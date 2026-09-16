@@ -24,7 +24,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from detector import DANGEROUS, WARNING, risk_from_findings
+from mcpshield.detector import DANGEROUS, WARNING, risk_from_findings
 
 SNAPSHOT_VERSION = 1
 

@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from detector import DANGEROUS, SAFE, WARNING
-from snapshot import (
+from mcpshield.detector import DANGEROUS, SAFE, WARNING
+from mcpshield.snapshot import (
     SNAPSHOT_VERSION,
     apply_diff,
     build_snapshot,

@@ -11,10 +11,17 @@ from mcp.client.stdio import stdio_client
 from rich.console import Console
 from rich.table import Table
 
-from detector import assess_tool
-from snapshot import apply_diff, build_snapshot, diff_snapshot, fingerprint, load_snapshot, save_snapshot
+from mcpshield import __version__
+from mcpshield.detector import assess_tool
+from mcpshield.snapshot import apply_diff, build_snapshot, diff_snapshot, fingerprint, load_snapshot, save_snapshot
 
-app = typer.Typer()
+app = typer.Typer(no_args_is_help=True)
+
+
+@app.callback()
+def main():
+    """MCPShield: scan MCP servers for tool poisoning."""
+
 
 RISK_STYLE = {
     "SAFE": "[green]SAFE[/green]",
@@ -128,6 +135,11 @@ def scan(
         help="After reporting, overwrite the baseline with what the server serves now.",
     ),
 ):
+    """Launch an MCP server over stdio and check every tool for poisoning.
+
+    SERVER is the full command line that starts the server, quoted as one
+    argument, e.g. "npx -y @modelcontextprotocol/server-filesystem /tmp".
+    """
     fail_on = fail_on.upper()
     if fail_on not in RISK_ORDER:
         raise typer.BadParameter(f"--fail-on must be one of {', '.join(RISK_ORDER)}")
@@ -148,6 +160,12 @@ def scan(
     worst = max((RISK_ORDER[e["risk"]] for e in report), default=0)
     if worst >= RISK_ORDER[fail_on] and worst > 0:
         sys.exit(1)
+
+
+@app.command()
+def version():
+    """Print the installed version."""
+    print(__version__)
 
 
 if __name__ == "__main__":

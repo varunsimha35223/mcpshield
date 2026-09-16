@@ -1,6 +1,6 @@
 import pytest
 
-from detector import (
+from mcpshield.detector import (
     DANGEROUS,
     SAFE,
     WARNING,
