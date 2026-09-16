@@ -31,6 +31,27 @@ The exit code is `1` when any tool reaches the `--fail-on` level
 (default `DANGEROUS`), so the scan can block a pipeline. Exit code `2` means
 the server could not be scanned at all (bad command, crash, or `--timeout`).
 
+### Remote servers that need OAuth
+
+Hosted servers often require the MCP authorization flow rather than a static
+header. Add `--oauth` and mcpshield will register itself, open your browser,
+and catch the redirect on `http://127.0.0.1:7867/callback`:
+
+```bash
+mcpshield scan https://mcp.example.com/mcp --oauth            # first run: browser round trip
+mcpshield scan https://mcp.example.com/mcp --oauth            # later runs: cached token
+mcpshield tokens                                              # what is cached
+mcpshield tokens --clear https://mcp.example.com/mcp          # forget one server
+```
+
+Tokens and the client registration live in `~/.config/mcpshield/tokens/`,
+one private file per server URL. In an audit, `--oauth` applies to every
+remote server; without the flag, only entries carrying `"oauth": true` (an
+mcpshield extension to the config format) use it. The flow needs a browser,
+so it is not for CI: use a token in `headers` there. `--oauth-port` changes
+the redirect port, but a server that already registered the old redirect URI
+will need `tokens --clear` first.
+
 ### Audit every server you have configured
 
 ```bash

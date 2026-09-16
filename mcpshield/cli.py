@@ -18,6 +18,7 @@ from rich.table import Table
 from mcpshield import __version__
 from mcpshield.config import REMOTE_TRANSPORTS, ServerSpec, discover_configs, load_servers
 from mcpshield.detector import assess_prompt, assess_resource, assess_tool, check_text, risk_from_findings
+from mcpshield.oauth import DEFAULT_CALLBACK_PORT, FLOW_TIMEOUT, FileTokenStorage, build_provider, list_stored
 from mcpshield.policy import DEFAULT_FILENAME, TEMPLATE, PolicyError, discover_policy, load_policy
 from mcpshield.sarif import to_sarif
 from mcpshield.snapshot import apply_diff, build_snapshot, diff_snapshot, fingerprint, load_snapshot, save_snapshot
@@ -92,6 +93,20 @@ def launch_string(spec):
     return f"{spec.transport} {spec.url}"
 
 
+def oauth_provider(spec):
+    """The OAuth auth object for a remote spec that asked for it, else None."""
+    if not spec.oauth:
+        return None
+    return build_provider(spec.url, port=spec.oauth_port or DEFAULT_CALLBACK_PORT, notify=err.print)
+
+
+def effective_timeout(spec, timeout):
+    """An interactive browser flow needs longer than the default handshake timeout."""
+    if spec.oauth:
+        return max(timeout, FLOW_TIMEOUT + 30)
+    return timeout
+
+
 @asynccontextmanager
 async def open_transport(spec):
     """Yield (read, write) streams for a ServerSpec over whichever transport it uses."""
@@ -102,12 +117,12 @@ async def open_transport(spec):
         async with stdio_client(params) as (read, write):
             yield read, write
     elif spec.transport == "http":
-        client = create_mcp_http_client(headers=spec.headers or None)
+        client = create_mcp_http_client(headers=spec.headers or None, auth=oauth_provider(spec))
         async with client:
             async with streamable_http_client(spec.url, http_client=client) as streams:
                 yield streams[0], streams[1]
     elif spec.transport == "sse":
-        async with sse_client(spec.url, headers=spec.headers or None) as (read, write):
+        async with sse_client(spec.url, headers=spec.headers or None, auth=oauth_provider(spec)) as (read, write):
             yield read, write
     else:
         raise ValueError(f"unsupported transport {spec.transport!r}")
@@ -503,6 +518,12 @@ def scan(
         "--read-resources",
         help=f"Also fetch every resource and scan its text (first {CONTENT_LIMIT // 1024} KB). Off by default: reading can have side effects.",
     ),
+    oauth: bool = typer.Option(
+        False,
+        "--oauth",
+        help="URL targets only: run the MCP OAuth flow (browser) if the server asks for it. Tokens are cached under ~/.config/mcpshield/tokens.",
+    ),
+    oauth_port: int = typer.Option(DEFAULT_CALLBACK_PORT, "--oauth-port", help="Local port for the OAuth redirect."),
 ):
     """Connect to an MCP server and check every tool for poisoning.
 
@@ -517,8 +538,13 @@ def scan(
 
     policy = resolve_policy(policy_path)
     spec = spec_from_target(server, transport.lower() if transport else None, dict(parse_header(h) for h in header))
+    if oauth:
+        if spec.transport == "stdio":
+            raise typer.BadParameter("--oauth only applies to URL targets")
+        spec.oauth = True
+        spec.oauth_port = oauth_port
     try:
-        report = asyncio.run(collect_tools(spec, timeout=timeout, policy=policy, read_resources=read_resources))
+        report = asyncio.run(collect_tools(spec, timeout=effective_timeout(spec, timeout), policy=policy, read_resources=read_resources))
     except Exception as exc:  # noqa: BLE001 - any launch failure is reported the same way
         err.print(f"[bold red]Could not scan server:[/bold red] {describe_error(exc)}")
         raise typer.Exit(code=2)
@@ -569,6 +595,12 @@ def audit(
         "--read-resources",
         help=f"Also fetch every resource and scan its text (first {CONTENT_LIMIT // 1024} KB). Off by default: reading can have side effects.",
     ),
+    oauth: bool = typer.Option(
+        False,
+        "--oauth",
+        help='Run the OAuth flow for every remote server (or only those with "oauth": true in the config when omitted).',
+    ),
+    oauth_port: int = typer.Option(DEFAULT_CALLBACK_PORT, "--oauth-port", help="Local port for the OAuth redirect."),
 ):
     """Scan every server defined in one or more MCP client config files.
 
@@ -613,8 +645,13 @@ def audit(
                 entry["error"] = f"{spec.transport} transport not supported"
                 continue
 
+            if spec.transport in REMOTE_TRANSPORTS:
+                spec.oauth = spec.oauth or oauth
+                spec.oauth_port = oauth_port
+            else:
+                spec.oauth = False
             try:
-                entry["tools"] = asyncio.run(collect_tools(spec, timeout=timeout, policy=policy, read_resources=read_resources))
+                entry["tools"] = asyncio.run(collect_tools(spec, timeout=effective_timeout(spec, timeout), policy=policy, read_resources=read_resources))
             except Exception as exc:  # noqa: BLE001 - keep auditing the other servers
                 entry["status"] = "error"
                 entry["error"] = describe_error(exc)
@@ -672,6 +709,32 @@ def policy(
         print(f"  allow     items {pol.allow_items}")
     if pol.allow_servers:
         print(f"  allow     servers {pol.allow_servers}")
+
+
+@app.command()
+def tokens(
+    clear: Optional[str] = typer.Option(None, "--clear", metavar="URL", help="Forget the stored OAuth tokens for this server URL."),
+    clear_all: bool = typer.Option(False, "--clear-all", help="Forget every stored OAuth token."),
+):
+    """List or forget cached OAuth tokens."""
+    stored = list_stored()
+    if clear_all:
+        for url, _path, _has in stored:
+            FileTokenStorage(url).clear()
+        err.print(f"[cyan]Cleared {len(stored)} server(s).[/cyan]")
+        return
+    if clear is not None:
+        if FileTokenStorage(clear).clear():
+            err.print(f"[cyan]Cleared tokens for[/cyan] {clear}")
+        else:
+            err.print(f"[yellow]No stored tokens for[/yellow] {clear}")
+            raise typer.Exit(code=1)
+        return
+    if not stored:
+        print("No stored OAuth tokens.")
+        return
+    for url, path, has_tokens in stored:
+        print(f"{'token' if has_tokens else 'registration only':17} {url}  ({path})")
 
 
 @app.command()

@@ -12,7 +12,8 @@ Supported shapes:
 Remote servers carry "url" and "type": "http" | "sse" (Claude Code also
 writes "streamable-http"; that is normalised to "http"), plus an optional
 "headers" block. A "type" nobody recognises is passed through unchanged so the
-caller can report the server as skipped.
+caller can report the server as skipped. An mcpshield-specific "oauth": true
+on a remote entry asks for the OAuth flow instead of static headers.
 """
 
 import json
@@ -34,6 +35,8 @@ class ServerSpec:
     env: dict[str, str] = field(default_factory=dict)
     url: str | None = None
     headers: dict[str, str] = field(default_factory=dict)
+    oauth: bool = False  # mcpshield extension: {"oauth": true} on a remote entry
+    oauth_port: int | None = None
     source: str = ""  # config file this came from
 
 
@@ -52,6 +55,7 @@ def _spec_from_entry(name, entry, source):
         env={str(k): str(v) for k, v in (entry.get("env") or {}).items()},
         url=entry.get("url"),
         headers={str(k): str(v) for k, v in (entry.get("headers") or {}).items()},
+        oauth=bool(entry.get("oauth", False)),
         source=source,
     )
 
