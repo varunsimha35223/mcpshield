@@ -17,7 +17,8 @@ from rich.table import Table
 
 from mcpshield import __version__
 from mcpshield.config import REMOTE_TRANSPORTS, ServerSpec, discover_configs, load_servers
-from mcpshield.detector import assess_prompt, assess_resource, assess_tool
+from mcpshield.detector import assess_prompt, assess_resource, assess_tool, risk_from_findings
+from mcpshield.policy import DEFAULT_FILENAME, TEMPLATE, PolicyError, discover_policy, load_policy
 from mcpshield.snapshot import apply_diff, build_snapshot, diff_snapshot, fingerprint, load_snapshot, save_snapshot
 
 app = typer.Typer(no_args_is_help=True)
@@ -108,8 +109,13 @@ async def open_transport(spec):
         raise ValueError(f"unsupported transport {spec.transport!r}")
 
 
-async def collect_tools(spec, timeout=DEFAULT_TIMEOUT):
-    """Connect to a server, list its tools, and assess each one."""
+async def collect_tools(spec, timeout=DEFAULT_TIMEOUT, policy=None):
+    """Connect to a server, list its tools, and assess each one.
+
+    `policy` supplies extra rules at assessment time. Severity overrides and
+    allow-lists are applied afterwards by finalize_report(), so that snapshot
+    findings are covered too.
+    """
     if spec.transport not in SUPPORTED_TRANSPORTS:
         raise ValueError(f"unsupported transport {spec.transport!r}")
     if spec.transport == "stdio" and not spec.command:
@@ -146,7 +152,7 @@ async def collect_tools(spec, timeout=DEFAULT_TIMEOUT):
 
     report = []
     for tool in tools:
-        risk, findings = assess_tool(tool.description, tool.input_schema, name=tool.name)
+        risk, findings = assess_tool(tool.description, tool.input_schema, name=tool.name, policy=policy)
         report.append({
             "kind": "tool",
             "name": tool.name,
@@ -160,7 +166,7 @@ async def collect_tools(spec, timeout=DEFAULT_TIMEOUT):
         for res in items:
             uri = str(getattr(res, "uri", None) or getattr(res, "uri_template", None) or getattr(res, "uriTemplate", ""))
             mime = getattr(res, "mime_type", None) or getattr(res, "mimeType", None)
-            risk, findings = assess_resource(res.description, uri=uri, name=res.name)
+            risk, findings = assess_resource(res.description, uri=uri, name=res.name, policy=policy)
             report.append({
                 "kind": kind,
                 "name": res.name,
@@ -176,7 +182,7 @@ async def collect_tools(spec, timeout=DEFAULT_TIMEOUT):
             {"name": a.name, "description": a.description, "required": bool(a.required)}
             for a in (prompt.arguments or [])
         ]
-        risk, findings = assess_prompt(prompt.description, arguments, name=prompt.name)
+        risk, findings = assess_prompt(prompt.description, arguments, name=prompt.name, policy=policy)
         report.append({
             "kind": "prompt",
             "name": prompt.name,
@@ -187,6 +193,25 @@ async def collect_tools(spec, timeout=DEFAULT_TIMEOUT):
             "inputs": [a["name"] for a in arguments],
         })
     return report
+
+
+def finalize_report(report, policy, server=None):
+    """Apply the policy's severity overrides and allow-lists, then recompute risk."""
+    for entry in report:
+        entry["findings"] = policy.filter_findings(entry["findings"], entry.get("kind", "tool"), entry["name"], server)
+        entry["risk"] = risk_from_findings(entry["findings"])
+    return report
+
+
+def resolve_policy(path, announce=True):
+    try:
+        policy = load_policy(path)
+    except (OSError, PolicyError) as exc:
+        err.print(f"[bold red]Could not load policy:[/bold red] {describe_error(exc)}")
+        raise typer.Exit(code=2)
+    if announce and policy.source:
+        err.print(f"[cyan]Policy:[/cyan] {policy.source}")
+    return policy
 
 
 def describe_error(exc):
@@ -239,7 +264,10 @@ def format_findings(findings):
     lines = []
     for f in findings:
         where = "" if f["location"] == "description" else f" (in {f['location']})"
-        lines.append(f"{f['rule']}: {f['evidence']}{where}")
+        line = f"{f['rule']}: {f['evidence']}{where}"
+        if f.get("allowed"):
+            line = f"[dim]{line} (allowed by policy)[/dim]"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -380,6 +408,11 @@ def scan(
         "-H",
         help="Extra HTTP header for URL targets, as 'Name: value'. Repeatable.",
     ),
+    policy_path: Optional[Path] = typer.Option(
+        None,
+        "--policy",
+        help=f"Policy file. Default: {DEFAULT_FILENAME} in the working directory or home directory, if present.",
+    ),
 ):
     """Connect to an MCP server and check every tool for poisoning.
 
@@ -392,9 +425,10 @@ def scan(
     if update_snapshot and snapshot is None:
         raise typer.BadParameter("--update-snapshot requires --snapshot")
 
+    policy = resolve_policy(policy_path)
     spec = spec_from_target(server, transport.lower() if transport else None, dict(parse_header(h) for h in header))
     try:
-        report = asyncio.run(collect_tools(spec, timeout=timeout))
+        report = asyncio.run(collect_tools(spec, timeout=timeout, policy=policy))
     except Exception as exc:  # noqa: BLE001 - any launch failure is reported the same way
         err.print(f"[bold red]Could not scan server:[/bold red] {describe_error(exc)}")
         raise typer.Exit(code=2)
@@ -402,6 +436,7 @@ def scan(
     diff = None
     if snapshot is not None:
         diff = apply_snapshot(report, launch_string(spec), snapshot, update_snapshot)
+    finalize_report(report, policy, server=server)
 
     if json_output:
         print(json.dumps(report, indent=2))
@@ -434,6 +469,11 @@ def audit(
         help="After reporting, overwrite each baseline with what the server serves now.",
     ),
     timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", help="Seconds to wait for each server to list tools."),
+    policy_path: Optional[Path] = typer.Option(
+        None,
+        "--policy",
+        help=f"Policy file. Default: {DEFAULT_FILENAME} in the working directory or home directory, if present.",
+    ),
 ):
     """Scan every server defined in one or more MCP client config files.
 
@@ -445,6 +485,7 @@ def audit(
     if update_snapshot and snapshot_dir is None:
         raise typer.BadParameter("--update-snapshot requires --snapshot-dir")
 
+    policy = resolve_policy(policy_path)
     paths = list(config) if config else discover_configs()
     if not paths:
         err.print("[bold red]No MCP config files found.[/bold red] Pass a path explicitly.")
@@ -478,7 +519,7 @@ def audit(
                 continue
 
             try:
-                entry["tools"] = asyncio.run(collect_tools(spec, timeout=timeout))
+                entry["tools"] = asyncio.run(collect_tools(spec, timeout=timeout, policy=policy))
             except Exception as exc:  # noqa: BLE001 - keep auditing the other servers
                 entry["status"] = "error"
                 entry["error"] = describe_error(exc)
@@ -488,6 +529,7 @@ def audit(
                 snap = snapshot_dir / snapshot_filename(spec.name)
                 entry["snapshot"] = str(snap)
                 entry["diff"] = apply_snapshot(entry["tools"], launch_string(spec), snap, update_snapshot)
+            finalize_report(entry["tools"], policy, server=spec.name)
 
     if not results:
         err.print(f"[yellow]No MCP servers defined in {len(paths)} config file(s). Nothing to audit.[/yellow]")
@@ -499,6 +541,45 @@ def audit(
 
     all_tools = [t for s in results for t in s["tools"]]
     sys.exit(exit_code_for(all_tools, fail_on))
+
+
+@app.command()
+def policy(
+    path: Optional[Path] = typer.Argument(None, help=f"Policy file to inspect or create. Default: ./{DEFAULT_FILENAME}"),
+    init: bool = typer.Option(False, "--init", help="Write a commented template policy file and exit."),
+):
+    """Show the effective policy, or create a template with --init."""
+    if init:
+        target = path or Path(DEFAULT_FILENAME)
+        if target.exists():
+            err.print(f"[bold red]{target} already exists.[/bold red] Remove it first or pass a different path.")
+            raise typer.Exit(code=2)
+        target.write_text(TEMPLATE, encoding="utf-8")
+        err.print(f"[cyan]Wrote[/cyan] {target}. Uncomment what you need.")
+        return
+
+    resolved = path if path is not None else discover_policy()
+    if resolved is None:
+        print(f"No policy file found. Looked for {DEFAULT_FILENAME} in the working directory and home directory.")
+        print("Create one with: mcpshield policy --init")
+        return
+    pol = resolve_policy(resolved, announce=False)
+    print(f"Policy: {pol.source}")
+    if pol.is_empty():
+        print("  (no overrides; built-in rules only)")
+        return
+    for rule, level in pol.severity.items():
+        print(f"  severity  {rule} = {level}")
+    for rule, phrases in pol.extra_phrases.items():
+        print(f"  phrases   {rule} += {phrases}")
+    for rule, patterns in pol.extra_patterns.items():
+        print(f"  patterns  {rule} += {patterns}")
+    if pol.allow_phrases:
+        print(f"  allow     phrases {pol.allow_phrases}")
+    if pol.allow_items:
+        print(f"  allow     items {pol.allow_items}")
+    if pol.allow_servers:
+        print(f"  allow     servers {pol.allow_servers}")
 
 
 @app.command()

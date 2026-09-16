@@ -158,23 +158,23 @@ def _finding(rule, severity, evidence, location):
     return {"rule": rule, "severity": severity, "evidence": evidence, "location": location}
 
 
-def check_phrases(text, location="description"):
+def check_phrases(text, location="description", rules=None):
     findings = []
     if not text:
         return findings
     lowered = text.lower()
-    for rule in PHRASE_RULES:
+    for rule in PHRASE_RULES if rules is None else rules:
         for phrase in rule["phrases"]:
             if phrase in lowered:
                 findings.append(_finding(rule["rule"], rule["severity"], phrase, location))
     return findings
 
 
-def check_patterns(text, location="description"):
+def check_patterns(text, location="description", rules=None):
     findings = []
     if not text:
         return findings
-    for rule in PATTERN_RULES:
+    for rule in PATTERN_RULES if rules is None else rules:
         match = rule["pattern"].search(text)
         if match:
             snippet = match.group(0)
@@ -209,13 +209,23 @@ def check_description(text):
     return check_phrases(text)
 
 
-def check_text(text, location="description"):
-    """Run every content check on one piece of text."""
-    return check_phrases(text, location) + check_patterns(text, location) + check_hidden_characters(text, location)
+def check_text(text, location="description", policy=None):
+    """Run every content check on one piece of text.
+
+    `policy` (see mcpshield.policy) can supply extra phrase and pattern rules.
+    """
+    phrase_rules = policy.phrase_rules if policy is not None else None
+    pattern_rules = policy.pattern_rules if policy is not None else None
+    return (
+        check_phrases(text, location, phrase_rules)
+        + check_patterns(text, location, pattern_rules)
+        + check_hidden_characters(text, location)
+    )
 
 
 def risk_from_findings(findings):
-    severities = {f["severity"] for f in findings}
+    """Worst severity among findings that are not allow-listed."""
+    severities = {f["severity"] for f in findings if not f.get("allowed")}
     if DANGEROUS in severities:
         return DANGEROUS
     if WARNING in severities:
@@ -223,12 +233,12 @@ def risk_from_findings(findings):
     return SAFE
 
 
-def assess_description(text):
+def assess_description(text, policy=None):
     """Assess a single description string. Returns (risk, findings)."""
     if not text:
         findings = check_description(text)
     else:
-        findings = check_text(text)
+        findings = check_text(text, policy=policy)
     return risk_from_findings(findings), findings
 
 
@@ -237,44 +247,44 @@ def check_name(name):
     return check_hidden_characters(name, location="name")
 
 
-def assess_tool(description, input_schema=None, name=None):
+def assess_tool(description, input_schema=None, name=None, policy=None):
     """Assess a tool's description and every parameter description.
 
     Parameter descriptions are shown to the model exactly like the tool
     description, so they are an equally good place to hide instructions.
     """
-    _, findings = assess_description(description)
+    _, findings = assess_description(description, policy)
     findings += check_name(name)
     properties = (input_schema or {}).get("properties", {}) or {}
     for param, spec in properties.items():
         if isinstance(spec, dict):
-            findings += check_text(spec.get("description"), location=f"input.{param}")
+            findings += check_text(spec.get("description"), location=f"input.{param}", policy=policy)
     return risk_from_findings(findings), findings
 
 
-def assess_prompt(description, arguments=None, name=None):
+def assess_prompt(description, arguments=None, name=None, policy=None):
     """Assess a prompt's description and each argument description.
 
     `arguments` is a list of dicts with at least "name" and "description".
     """
-    _, findings = assess_description(description)
+    _, findings = assess_description(description, policy)
     findings += check_name(name)
     for arg in arguments or []:
         if isinstance(arg, dict):
-            findings += check_text(arg.get("description"), location=f"argument.{arg.get('name', '?')}")
+            findings += check_text(arg.get("description"), location=f"argument.{arg.get('name', '?')}", policy=policy)
     return risk_from_findings(findings), findings
 
 
-def assess_resource(description, uri=None, name=None):
+def assess_resource(description, uri=None, name=None, policy=None):
     """Assess a resource or resource template.
 
     Resources often have no description, and that is normal, so a missing
     one is not a finding here. The URI is checked for hidden characters and
     for embedded instructions, since it is shown to the model verbatim.
     """
-    findings = check_text(description) if description else []
+    findings = check_text(description, policy=policy) if description else []
     findings += check_name(name)
     if uri:
         findings += check_hidden_characters(uri, location="uri")
-        findings += check_phrases(uri, location="uri")
+        findings += check_phrases(uri, location="uri", rules=policy.phrase_rules if policy is not None else None)
     return risk_from_findings(findings), findings

@@ -64,6 +64,36 @@ tracked separately, so a prompt and a tool with the same name never collide.
 Commit the baseline next to your MCP config so CI catches a swap. Baselines
 written by older versions (tools only) are read and upgraded automatically.
 
+### Policy file
+
+Silence a false positive, raise a severity, or add your own rules without
+touching the scanner. Put a `.mcpshield.toml` in the working directory (or
+your home directory), or pass `--policy PATH`:
+
+```toml
+[severity]
+credential_reference = "DANGEROUS"   # raise
+embedded_url = "IGNORE"              # drop a rule entirely
+new_item = "IGNORE"                  # snapshot rules can be tuned too
+
+[phrases]
+hidden_instruction = ["you are now"] # extend a built-in rule
+company_policy = ["contact hr"]      # or add one (WARNING unless [severity] says otherwise)
+
+[patterns]
+internal_host = ['(?i)\binternal\.corp\b']
+
+[allow]
+phrases = ["api key"]                # never flag these built-in phrases
+items = ["tool:get_secret", "prompt:*"]   # kind:name globs; findings stay in the report, marked allowed
+servers = ["trusted-*"]              # server-name globs (audit) or scan targets
+```
+
+`mcpshield policy --init` writes a commented template; `mcpshield policy`
+shows what is in effect. Allowed findings stay visible in the output and in
+JSON (`"allowed": true`) but no longer count toward the risk level or exit
+code.
+
 ## Risk levels
 
 | Level | Meaning |
