@@ -9,8 +9,10 @@ Supported shapes:
     VS Code (.vscode/mcp.json):
         {"servers": {"<name>": {"command": "...", "args": [...], "type": "stdio"}}}
 
-Remote servers carry "url" and/or "type": "http" | "sse". They are returned
-with that transport so the caller can report them as skipped.
+Remote servers carry "url" and "type": "http" | "sse" (Claude Code also
+writes "streamable-http"; that is normalised to "http"), plus an optional
+"headers" block. A "type" nobody recognises is passed through unchanged so the
+caller can report the server as skipped.
 """
 
 import json
@@ -19,7 +21,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-REMOTE_TRANSPORTS = {"http", "sse", "streamable-http", "streamable_http"}
+TRANSPORT_ALIASES = {"streamable-http": "http", "streamable_http": "http", "streamablehttp": "http"}
+REMOTE_TRANSPORTS = {"http", "sse"}
 
 
 @dataclass
@@ -30,6 +33,7 @@ class ServerSpec:
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     url: str | None = None
+    headers: dict[str, str] = field(default_factory=dict)
     source: str = ""  # config file this came from
 
 
@@ -39,6 +43,7 @@ def _spec_from_entry(name, entry, source):
     transport = (entry.get("type") or "").lower()
     if not transport:
         transport = "http" if entry.get("url") else "stdio"
+    transport = TRANSPORT_ALIASES.get(transport, transport)
     return ServerSpec(
         name=name,
         transport=transport,
@@ -46,6 +51,7 @@ def _spec_from_entry(name, entry, source):
         args=[str(a) for a in entry.get("args", []) or []],
         env={str(k): str(v) for k, v in (entry.get("env") or {}).items()},
         url=entry.get("url"),
+        headers={str(k): str(v) for k, v in (entry.get("headers") or {}).items()},
         source=source,
     )
 

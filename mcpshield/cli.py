@@ -3,17 +3,20 @@ import json
 import re
 import shlex
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 
 import typer
 from mcp import ClientSession, StdioServerParameters
+from mcp.client.sse import sse_client
 from mcp.client.stdio import get_default_environment, stdio_client
+from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 from rich.console import Console
 from rich.table import Table
 
 from mcpshield import __version__
-from mcpshield.config import discover_configs, load_servers
+from mcpshield.config import REMOTE_TRANSPORTS, ServerSpec, discover_configs, load_servers
 from mcpshield.detector import assess_tool
 from mcpshield.snapshot import apply_diff, build_snapshot, diff_snapshot, fingerprint, load_snapshot, save_snapshot
 
@@ -43,23 +46,79 @@ err = Console(stderr=True)
 # --- Collecting tools -------------------------------------------------------
 
 
-def parse_command(server_command):
-    """Split a quoted command line into (command, args)."""
-    parts = shlex.split(server_command)
+SUPPORTED_TRANSPORTS = {"stdio", *REMOTE_TRANSPORTS}
+
+
+def parse_header(text):
+    """'Name: value' -> ('Name', 'value')."""
+    name, sep, value = text.partition(":")
+    if not sep or not name.strip():
+        raise typer.BadParameter(f"header must look like 'Name: value', got {text!r}")
+    return name.strip(), value.strip()
+
+
+def spec_from_target(target, transport=None, headers=None):
+    """Build a ServerSpec from a scan target: a URL or a quoted command line."""
+    headers = dict(headers or {})
+    if re.match(r"^https?://", target, re.IGNORECASE):
+        transport = transport or "http"
+        if transport not in REMOTE_TRANSPORTS:
+            raise typer.BadParameter(f"a URL target needs --transport http or sse, not {transport}")
+        return ServerSpec(name=target, transport=transport, url=target, headers=headers)
+
+    if transport not in (None, "stdio"):
+        raise typer.BadParameter(f"--transport {transport} needs a URL target")
+    parts = shlex.split(target)
     if not parts:
         raise typer.BadParameter("server command is empty")
-    return parts[0], parts[1:]
+    return ServerSpec(name=target, transport="stdio", command=parts[0], args=parts[1:])
 
 
-async def collect_tools(command, args=(), env=None, timeout=DEFAULT_TIMEOUT):
-    """Launch a stdio server, list its tools, and assess each one."""
-    full_env = get_default_environment()
-    if env:
-        full_env.update(env)
-    server = StdioServerParameters(command=command, args=list(args), env=full_env)
+def parse_command(server_command):
+    """Split a quoted command line into (command, args). Kept for callers that only need that."""
+    spec = spec_from_target(server_command)
+    return spec.command, spec.args
+
+
+def launch_string(spec):
+    """Human-readable 'how this server was reached', stored in snapshots."""
+    if spec.transport == "stdio":
+        return " ".join(shlex.quote(p) for p in [spec.command, *spec.args])
+    return f"{spec.transport} {spec.url}"
+
+
+@asynccontextmanager
+async def open_transport(spec):
+    """Yield (read, write) streams for a ServerSpec over whichever transport it uses."""
+    if spec.transport == "stdio":
+        env = get_default_environment()
+        env.update(spec.env)
+        params = StdioServerParameters(command=spec.command, args=list(spec.args), env=env)
+        async with stdio_client(params) as (read, write):
+            yield read, write
+    elif spec.transport == "http":
+        client = create_mcp_http_client(headers=spec.headers or None)
+        async with client:
+            async with streamable_http_client(spec.url, http_client=client) as streams:
+                yield streams[0], streams[1]
+    elif spec.transport == "sse":
+        async with sse_client(spec.url, headers=spec.headers or None) as (read, write):
+            yield read, write
+    else:
+        raise ValueError(f"unsupported transport {spec.transport!r}")
+
+
+async def collect_tools(spec, timeout=DEFAULT_TIMEOUT):
+    """Connect to a server, list its tools, and assess each one."""
+    if spec.transport not in SUPPORTED_TRANSPORTS:
+        raise ValueError(f"unsupported transport {spec.transport!r}")
+    if spec.transport == "stdio" and not spec.command:
+        raise ValueError("no command in config")
+    if spec.transport in REMOTE_TRANSPORTS and not spec.url:
+        raise ValueError("no url in config")
 
     async def inner():
-        async with stdio_client(server) as (read, write):
+        async with open_transport(spec) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 return await session.list_tools()
@@ -84,6 +143,8 @@ def describe_error(exc):
     """One-line, human-readable reason a server could not be scanned."""
     if isinstance(exc, asyncio.TimeoutError):
         return "timed out waiting for the server to answer initialize/list_tools"
+    if isinstance(exc, ValueError):  # our own config-validation messages are already readable
+        return str(exc)
     # anyio wraps subprocess failures in an ExceptionGroup; surface the leaves.
     leaves = getattr(exc, "exceptions", None)
     if leaves:
@@ -235,26 +296,39 @@ def scan(
         help="After reporting, overwrite the baseline with what the server serves now.",
     ),
     timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", help="Seconds to wait for the server to list tools."),
+    transport: Optional[str] = typer.Option(
+        None,
+        "--transport",
+        help="Force a transport for a URL target: http (streamable HTTP, the default) or sse.",
+    ),
+    header: List[str] = typer.Option(
+        [],
+        "--header",
+        "-H",
+        help="Extra HTTP header for URL targets, as 'Name: value'. Repeatable.",
+    ),
 ):
-    """Launch an MCP server over stdio and check every tool for poisoning.
+    """Connect to an MCP server and check every tool for poisoning.
 
-    SERVER is the full command line that starts the server, quoted as one
-    argument, e.g. "npx -y @modelcontextprotocol/server-filesystem /tmp".
+    SERVER is either a URL (http:// or https://, streamable HTTP by default,
+    --transport sse for legacy SSE) or the full command line that starts a
+    stdio server, quoted as one argument, e.g.
+    "npx -y @modelcontextprotocol/server-filesystem /tmp".
     """
     fail_on = validate_fail_on(fail_on)
     if update_snapshot and snapshot is None:
         raise typer.BadParameter("--update-snapshot requires --snapshot")
 
-    command, args = parse_command(server)
+    spec = spec_from_target(server, transport.lower() if transport else None, dict(parse_header(h) for h in header))
     try:
-        report = asyncio.run(collect_tools(command, args, timeout=timeout))
+        report = asyncio.run(collect_tools(spec, timeout=timeout))
     except Exception as exc:  # noqa: BLE001 - any launch failure is reported the same way
         err.print(f"[bold red]Could not scan server:[/bold red] {describe_error(exc)}")
         raise typer.Exit(code=2)
 
     diff = None
     if snapshot is not None:
-        diff = apply_snapshot(report, server, snapshot, update_snapshot)
+        diff = apply_snapshot(report, launch_string(spec), snapshot, update_snapshot)
 
     if json_output:
         print(json.dumps(report, indent=2))
@@ -290,8 +364,9 @@ def audit(
 ):
     """Scan every server defined in one or more MCP client config files.
 
-    Servers that fail to start or time out are reported as ERROR and do not
-    stop the audit. Remote (http/sse) servers are reported as SKIPPED.
+    stdio, http and sse servers are all scanned. Servers that fail to start,
+    refuse the connection, or time out are reported as ERROR and do not stop
+    the audit. Servers with an unknown transport type are reported as SKIPPED.
     """
     fail_on = validate_fail_on(fail_on)
     if update_snapshot and snapshot_dir is None:
@@ -324,17 +399,13 @@ def audit(
             }
             results.append(entry)
 
-            if spec.transport != "stdio":
+            if spec.transport not in SUPPORTED_TRANSPORTS:
                 entry["status"] = "skipped"
-                entry["error"] = f"{spec.transport} transport not supported yet"
-                continue
-            if not spec.command:
-                entry["status"] = "error"
-                entry["error"] = "no command in config"
+                entry["error"] = f"{spec.transport} transport not supported"
                 continue
 
             try:
-                entry["tools"] = asyncio.run(collect_tools(spec.command, spec.args, spec.env, timeout=timeout))
+                entry["tools"] = asyncio.run(collect_tools(spec, timeout=timeout))
             except Exception as exc:  # noqa: BLE001 - keep auditing the other servers
                 entry["status"] = "error"
                 entry["error"] = describe_error(exc)
@@ -342,9 +413,8 @@ def audit(
 
             if snapshot_dir is not None:
                 snap = snapshot_dir / snapshot_filename(spec.name)
-                launch = " ".join(shlex.quote(p) for p in [spec.command, *spec.args])
                 entry["snapshot"] = str(snap)
-                entry["diff"] = apply_snapshot(entry["tools"], launch, snap, update_snapshot)
+                entry["diff"] = apply_snapshot(entry["tools"], launch_string(spec), snap, update_snapshot)
 
     if not results:
         err.print(f"[yellow]No MCP servers defined in {len(paths)} config file(s). Nothing to audit.[/yellow]")

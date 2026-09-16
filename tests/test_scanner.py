@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from mcpshield.cli import app, collect_tools, parse_command
+from mcpshield.cli import app, collect_tools, spec_from_target
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 EVIL = f"{sys.executable} {FIXTURES / 'evil_server.py'}"
@@ -20,7 +20,7 @@ runner = CliRunner()
 def report():
     import asyncio
 
-    return {entry["name"]: entry for entry in asyncio.run(collect_tools(*parse_command(EVIL)))}
+    return {entry["name"]: entry for entry in asyncio.run(collect_tools(spec_from_target(EVIL)))}
 
 
 def test_fixture_exposes_all_tools(report):
@@ -182,7 +182,7 @@ def test_audit_mixed_config(tmp_path):
     cfg = write_config(tmp_path / "claude_desktop_config.json", {
         "clean": fixture_server("clean_server.py"),
         "evil": fixture_server("evil_server.py"),
-        "remote": {"type": "http", "url": "https://mcp.example.com"},
+        "unknown": {"type": "websocket", "url": "ws://mcp.example.com"},
         "broken": {"command": "/definitely/not/a/real/binary"},
         "nocmd": {"args": ["x"]},
     })
@@ -197,9 +197,9 @@ def test_audit_mixed_config(tmp_path):
     assert data["evil"]["status"] == "ok"
     assert sum(t["risk"] == "DANGEROUS" for t in data["evil"]["tools"]) == 4
 
-    assert data["remote"]["status"] == "skipped"
-    assert "http" in data["remote"]["error"]
-    assert data["remote"]["tools"] == []
+    assert data["unknown"]["status"] == "skipped"
+    assert "websocket" in data["unknown"]["error"]
+    assert data["unknown"]["tools"] == []
 
     assert data["broken"]["status"] == "error"
     assert data["broken"]["error"]

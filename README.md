@@ -1,7 +1,7 @@
 # MCPShield
 
 Static scanner for [Model Context Protocol](https://modelcontextprotocol.io) servers.
-It connects to a server over stdio, lists its tools, and checks every tool and
+It connects to a server over stdio, streamable HTTP, or SSE, lists its tools, and checks every tool and
 parameter description for signs of **tool poisoning**: hidden instructions,
 exfiltration prompts, cross-tool hijacking, credential references, and invisible
 Unicode. A baseline snapshot catches **rug pulls**, where descriptions change
@@ -19,7 +19,9 @@ From a checkout, `uv run mcpshield ...` works without installing.
 ## Usage
 
 ```bash
-mcpshield scan "npx -y @modelcontextprotocol/server-filesystem /tmp"
+mcpshield scan "npx -y @modelcontextprotocol/server-filesystem /tmp"     # stdio
+mcpshield scan https://mcp.example.com/mcp -H "Authorization: Bearer $TOKEN"  # streamable HTTP
+mcpshield scan https://mcp.example.com/sse --transport sse                  # legacy SSE
 mcpshield scan "uv run python tests/fixtures/evil_server.py" --json
 mcpshield scan "..." --fail-on warning   # stricter CI gate
 ```
@@ -37,10 +39,11 @@ mcpshield audit --json --snapshot-dir .mcpshield/   # per-server baselines for C
 ```
 
 `audit` reads `mcpServers` / `servers` blocks (and Claude Code's per-project
-servers), launches each stdio server with the `env` from the config, and
-prints one table for all of them. A server that fails to start or times out
-shows as `ERROR` and does not stop the audit or change the exit code. Remote
-`http` / `sse` servers show as `SKIPPED` until that transport is supported.
+servers). stdio servers are launched with the `env` from the config; `http`
+and `sse` servers are connected to with their `headers`. Everything lands in
+one table. A server that fails to start, refuses the connection, or times out
+shows as `ERROR` and does not stop the audit or change the exit code. Any
+other transport type shows as `SKIPPED`.
 
 ### Rug-pull detection
 

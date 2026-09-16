@@ -39,6 +39,8 @@ def test_vscode_servers_key(tmp_path):
         ({"type": "http", "url": "https://mcp.example.com"}, "http"),
         ({"type": "sse", "url": "https://mcp.example.com/sse"}, "sse"),
         ({"type": "HTTP", "url": "https://x"}, "http"),
+        ({"type": "streamable-http", "url": "https://x"}, "http"),
+        ({"type": "streamable_http", "url": "https://x"}, "http"),
     ],
 )
 def test_remote_entries_keep_their_transport(tmp_path, entry, transport):
@@ -118,3 +120,17 @@ def test_discover_configs_only_returns_existing(tmp_path):
 
 def test_discover_configs_empty_when_nothing_exists(tmp_path):
     assert discover_configs(home=tmp_path, cwd=tmp_path) == []
+
+
+def test_headers_are_read_for_remote_servers(tmp_path):
+    cfg = write(tmp_path / "c.json", {"mcpServers": {
+        "r": {"type": "http", "url": "https://x", "headers": {"Authorization": "Bearer t", "X-N": 1}},
+    }})
+    (spec,) = load_servers(cfg)
+    assert spec.headers == {"Authorization": "Bearer t", "X-N": "1"}
+
+
+def test_unknown_transport_is_passed_through(tmp_path):
+    cfg = write(tmp_path / "c.json", {"mcpServers": {"w": {"type": "websocket", "url": "ws://x"}}})
+    (spec,) = load_servers(cfg)
+    assert spec.transport == "websocket"
