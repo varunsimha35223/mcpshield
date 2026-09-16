@@ -8,7 +8,7 @@ from mcp.client.stdio import stdio_client
 from rich.console import Console
 from rich.table import Table
 
-from detector import assess_description
+from detector import assess_tool
 
 app = typer.Typer()
 
@@ -25,7 +25,11 @@ RISK_ORDER = {"SAFE": 0, "WARNING": 1, "DANGEROUS": 2}
 def format_findings(findings):
     if not findings:
         return "No problems found."
-    return "\n".join(f"{f['rule']}: {f['evidence']}" for f in findings)
+    lines = []
+    for f in findings:
+        where = "" if f["location"] == "description" else f" (in {f['location']})"
+        lines.append(f"{f['rule']}: {f['evidence']}{where}")
+    return "\n".join(lines)
 
 
 async def collect_tools(server_command):
@@ -38,7 +42,7 @@ async def collect_tools(server_command):
 
     report = []
     for tool in result.tools:
-        risk, findings = assess_description(tool.description)
+        risk, findings = assess_tool(tool.description, tool.input_schema)
         report.append({
             "name": tool.name,
             "risk": risk,
