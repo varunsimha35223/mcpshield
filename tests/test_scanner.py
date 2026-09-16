@@ -17,41 +17,76 @@ runner = CliRunner()
 
 
 @pytest.fixture(scope="module")
-def report():
+def full_report():
     import asyncio
 
-    return {entry["name"]: entry for entry in asyncio.run(collect_tools(spec_from_target(EVIL)))}
+    return asyncio.run(collect_tools(spec_from_target(EVIL)))
 
 
-def test_fixture_exposes_all_tools(report):
-    assert set(report) == {"add_numbers", "get_weather", "read_notes", "format_text", "lookup_zip"}
+@pytest.fixture(scope="module")
+def tools(full_report):
+    return {e["name"]: e for e in full_report if e["kind"] == "tool"}
 
 
-def test_clean_tool_is_safe(report):
-    assert report["add_numbers"]["risk"] == "SAFE"
-    assert report["add_numbers"]["findings"] == []
-    assert report["add_numbers"]["inputs"] == ["a", "b"]
+def by_kind(full_report, kind):
+    return {e["name"]: e for e in full_report if e["kind"] == kind}
 
 
-def test_poisoned_description(report):
-    rules = {f["rule"] for f in report["get_weather"]["findings"]}
-    assert report["get_weather"]["risk"] == "DANGEROUS"
+def test_fixture_exposes_all_tools(tools):
+    assert set(tools) == {"add_numbers", "get_weather", "read_notes", "format_text", "lookup_zip"}
+
+
+def test_fixture_exposes_resources_and_prompts(full_report):
+    assert set(by_kind(full_report, "resource")) == {"readme", "secrets"}
+    assert set(by_kind(full_report, "resource_template")) == {"any_file"}
+    assert set(by_kind(full_report, "prompt")) == {"summarize", "review", "translate"}
+
+
+def test_resources_are_assessed(full_report):
+    res = by_kind(full_report, "resource")
+    assert res["readme"]["risk"] == "SAFE"
+    assert res["readme"]["uri"] == "notes://readme"
+    assert res["secrets"]["risk"] == "DANGEROUS"
+    assert {f["rule"] for f in res["secrets"]["findings"]} >= {"exfiltration", "embedded_url"}
+    tmpl = by_kind(full_report, "resource_template")["any_file"]
+    assert tmpl["risk"] == "DANGEROUS"
+    assert tmpl["findings"][0]["rule"] == "invisible_unicode"
+
+
+def test_prompts_are_assessed(full_report):
+    prompts = by_kind(full_report, "prompt")
+    assert prompts["summarize"]["risk"] == "SAFE"
+    assert prompts["summarize"]["inputs"] == ["text"]
+    assert prompts["review"]["risk"] == "DANGEROUS"
+    assert prompts["translate"]["risk"] == "DANGEROUS"
+    assert all(f["location"] == "argument.text" for f in prompts["translate"]["findings"])
+
+
+def test_clean_tool_is_safe(tools):
+    assert tools["add_numbers"]["risk"] == "SAFE"
+    assert tools["add_numbers"]["findings"] == []
+    assert tools["add_numbers"]["inputs"] == ["a", "b"]
+
+
+def test_poisoned_description(tools):
+    rules = {f["rule"] for f in tools["get_weather"]["findings"]}
+    assert tools["get_weather"]["risk"] == "DANGEROUS"
     assert {"hidden_instruction", "exfiltration", "credential_reference", "embedded_url", "sensitive_path"} <= rules
 
 
-def test_hidden_unicode(report):
-    assert report["read_notes"]["risk"] == "DANGEROUS"
-    assert any(f["rule"] == "invisible_unicode" for f in report["read_notes"]["findings"])
+def test_hidden_unicode(tools):
+    assert tools["read_notes"]["risk"] == "DANGEROUS"
+    assert any(f["rule"] == "invisible_unicode" for f in tools["read_notes"]["findings"])
 
 
-def test_tool_shadowing(report):
-    assert report["format_text"]["risk"] == "DANGEROUS"
-    assert any(f["rule"] == "tool_shadowing" for f in report["format_text"]["findings"])
+def test_tool_shadowing(tools):
+    assert tools["format_text"]["risk"] == "DANGEROUS"
+    assert any(f["rule"] == "tool_shadowing" for f in tools["format_text"]["findings"])
 
 
-def test_poisoned_parameter(report):
-    findings = report["lookup_zip"]["findings"]
-    assert report["lookup_zip"]["risk"] == "DANGEROUS"
+def test_poisoned_parameter(tools):
+    findings = tools["lookup_zip"]["findings"]
+    assert tools["lookup_zip"]["risk"] == "DANGEROUS"
     assert all(f["location"] == "input.zip_code" for f in findings)
 
 
@@ -59,7 +94,8 @@ def test_cli_json_output_and_exit_code():
     result = runner.invoke(app, ["scan", EVIL, "--json"])
     assert result.exit_code == 1
     data = json.loads(result.stdout)
-    assert len(data) == 5
+    assert len(data) == 11
+    assert {d["kind"] for d in data} == {"tool", "resource", "resource_template", "prompt"}
 
 
 def test_cli_rejects_invalid_fail_on():
@@ -86,8 +122,9 @@ def test_cli_table_output_mentions_summary():
     result = runner.invoke(app, ["scan", EVIL])
     assert result.exit_code == 1
     assert "Summary:" in result.stdout
-    assert "DANGEROUS 4" in result.stdout
-    assert "SAFE 1" in result.stdout
+    assert "DANGEROUS 8" in result.stdout
+    assert "SAFE 3" in result.stdout
+    assert "5 tools, 3 resources, 3 prompts" in result.stdout
 
 
 # --- Snapshot / rug-pull end to end -----------------------------------------
@@ -195,7 +232,7 @@ def test_audit_mixed_config(tmp_path):
     assert data["clean"]["config"] == str(cfg)
 
     assert data["evil"]["status"] == "ok"
-    assert sum(t["risk"] == "DANGEROUS" for t in data["evil"]["tools"]) == 4
+    assert sum(t["risk"] == "DANGEROUS" for t in data["evil"]["tools"]) == 8
 
     assert data["unknown"]["status"] == "skipped"
     assert "websocket" in data["unknown"]["error"]
@@ -272,7 +309,7 @@ def test_audit_snapshot_dir_lifecycle(tmp_path):
     result = runner.invoke(app, ["audit", str(cfg), "--json", "--snapshot-dir", str(snaps)])
     assert result.exit_code == 1
     (server,) = json.loads(result.stdout)
-    assert server["diff"]["changed"] == ["get_weather"]
+    assert server["diff"]["changed"] == ["tool:get_weather"]
     assert server["tools"][0]["findings"][0]["rule"] == "rug_pull"
 
     result = runner.invoke(app, ["audit", str(cfg), "--json", "--snapshot-dir", str(snaps), "--update-snapshot"])

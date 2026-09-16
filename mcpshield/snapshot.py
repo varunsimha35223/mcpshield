@@ -2,21 +2,26 @@
 
 A "rug pull" is a server whose tools look clean when you install them and
 whose descriptions change later, after the user has approved them. Static
-rules can't see that. A snapshot records a fingerprint of every tool on the
+rules can't see that. A snapshot records a fingerprint of every item on the
 first scan; later scans diff against it and flag anything that moved.
 
-Snapshot file format (JSON):
+Snapshot file format (JSON, version 2):
     {
-      "version": 1,
+      "version": 2,
       "created": "<ISO-8601 UTC>",
-      "server": "<command used to launch the server>",
-      "tools": {
-        "<tool name>": {
+      "server": "<how the server was reached>",
+      "items": {
+        "<kind>:<name>": {
+          "kind": "tool" | "resource" | "resource_template" | "prompt",
+          "name": "<name>",
           "fingerprint": "<sha256>",
           "description": "<description text at baseline>"
         }
       }
     }
+
+Version 1 files (tools only, keyed by bare name under "tools") are read and
+upgraded in memory.
 """
 
 import hashlib
@@ -26,32 +31,54 @@ from pathlib import Path
 
 from mcpshield.detector import DANGEROUS, WARNING, risk_from_findings
 
-SNAPSHOT_VERSION = 1
+SNAPSHOT_VERSION = 2
 
 
-def fingerprint(description, input_schema):
-    """Stable hash of what the model actually sees for a tool."""
-    payload = json.dumps(
-        {"description": description or "", "input_schema": input_schema or {}},
+def fingerprint(description, payload):
+    """Stable hash of what the model actually sees for an item.
+
+    `payload` is whatever else defines the item: a tool's input schema, a
+    prompt's argument list, a resource's URI and MIME type.
+    """
+    blob = json.dumps(
+        {"description": description or "", "payload": payload or {}},
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
     )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def item_key(entry):
+    return f"{entry.get('kind', 'tool')}:{entry['name']}"
 
 
 def build_snapshot(report, server=""):
-    """Turn a scan report (list of tool entries) into a snapshot dict."""
+    """Turn a scan report (list of item entries) into a snapshot dict."""
     return {
         "version": SNAPSHOT_VERSION,
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "server": server,
-        "tools": {
-            entry["name"]: {
+        "items": {
+            item_key(entry): {
+                "kind": entry.get("kind", "tool"),
+                "name": entry["name"],
                 "fingerprint": entry["fingerprint"],
                 "description": entry["description"],
             }
             for entry in report
+        },
+    }
+
+
+def _upgrade_v1(data):
+    return {
+        "version": SNAPSHOT_VERSION,
+        "created": data.get("created", ""),
+        "server": data.get("server", ""),
+        "items": {
+            f"tool:{name}": {"kind": "tool", "name": name, **record}
+            for name, record in data.get("tools", {}).items()
         },
     }
 
@@ -61,8 +88,11 @@ def load_snapshot(path):
     if not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("version") != SNAPSHOT_VERSION:
-        raise ValueError(f"{path}: unsupported snapshot version {data.get('version')!r}")
+    version = data.get("version")
+    if version == 1:
+        return _upgrade_v1(data)
+    if version != SNAPSHOT_VERSION:
+        raise ValueError(f"{path}: unsupported snapshot version {version!r}")
     return data
 
 
@@ -71,38 +101,38 @@ def save_snapshot(path, snapshot):
 
 
 def diff_snapshot(baseline, current):
-    """Compare two snapshots. Returns dict of name lists: changed, added, removed, unchanged."""
-    old_tools = baseline["tools"]
-    new_tools = current["tools"]
+    """Compare two snapshots. Returns dict of item-key lists: changed, added, removed, unchanged."""
+    old_items = baseline["items"]
+    new_items = current["items"]
     result = {"changed": [], "added": [], "removed": [], "unchanged": []}
-    for name, new in new_tools.items():
-        old = old_tools.get(name)
+    for key, new in new_items.items():
+        old = old_items.get(key)
         if old is None:
-            result["added"].append(name)
+            result["added"].append(key)
         elif old["fingerprint"] != new["fingerprint"]:
-            result["changed"].append(name)
+            result["changed"].append(key)
         else:
-            result["unchanged"].append(name)
-    for name in old_tools:
-        if name not in new_tools:
-            result["removed"].append(name)
+            result["unchanged"].append(key)
+    for key in old_items:
+        if key not in new_items:
+            result["removed"].append(key)
     return result
 
 
 def apply_diff(report, baseline, diff):
     """Fold a diff into the scan report as findings. Mutates and returns the report.
 
-    - changed tool  -> DANGEROUS "rug_pull" finding on that tool
-    - added tool    -> WARNING "new_tool" finding on that tool
-    - removed tool  -> a synthetic report entry with a WARNING "removed_tool" finding
+    - changed item  -> DANGEROUS "rug_pull" finding on that item
+    - added item    -> WARNING "new_item" finding on that item
+    - removed item  -> a synthetic report entry with a WARNING "removed_item" finding
     """
     created = baseline.get("created", "unknown date")[:10]  # date only; keep the table readable
-    by_name = {entry["name"]: entry for entry in report}
+    by_key = {item_key(entry): entry for entry in report}
 
-    for name in diff["changed"]:
-        entry = by_name[name]
-        old_desc = baseline["tools"][name]["description"]
-        what = "description" if old_desc != entry["description"] else "input schema"
+    for key in diff["changed"]:
+        entry = by_key[key]
+        old_desc = baseline["items"][key]["description"]
+        what = "description" if old_desc != entry["description"] else "definition"
         entry["findings"].append({
             "rule": "rug_pull",
             "severity": DANGEROUS,
@@ -111,24 +141,26 @@ def apply_diff(report, baseline, diff):
         })
         entry["risk"] = risk_from_findings(entry["findings"])
 
-    for name in diff["added"]:
-        entry = by_name[name]
+    for key in diff["added"]:
+        entry = by_key[key]
         entry["findings"].append({
-            "rule": "new_tool",
+            "rule": "new_item",
             "severity": WARNING,
             "evidence": f"not present in baseline {created}",
             "location": "snapshot",
         })
         entry["risk"] = risk_from_findings(entry["findings"])
 
-    for name in diff["removed"]:
+    for key in diff["removed"]:
+        old = baseline["items"][key]
         report.append({
-            "name": name,
+            "kind": old.get("kind", "tool"),
+            "name": old["name"],
             "risk": WARNING,
-            "description": baseline["tools"][name]["description"],
-            "fingerprint": baseline["tools"][name]["fingerprint"],
+            "description": old["description"],
+            "fingerprint": old["fingerprint"],
             "findings": [{
-                "rule": "removed_tool",
+                "rule": "removed_item",
                 "severity": WARNING,
                 "evidence": f"present in baseline {created}, missing now",
                 "location": "snapshot",

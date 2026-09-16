@@ -17,7 +17,7 @@ from rich.table import Table
 
 from mcpshield import __version__
 from mcpshield.config import REMOTE_TRANSPORTS, ServerSpec, discover_configs, load_servers
-from mcpshield.detector import assess_tool
+from mcpshield.detector import assess_prompt, assess_resource, assess_tool
 from mcpshield.snapshot import apply_diff, build_snapshot, diff_snapshot, fingerprint, load_snapshot, save_snapshot
 
 app = typer.Typer(no_args_is_help=True)
@@ -117,24 +117,74 @@ async def collect_tools(spec, timeout=DEFAULT_TIMEOUT):
     if spec.transport in REMOTE_TRANSPORTS and not spec.url:
         raise ValueError("no url in config")
 
+    async def optional(coro):
+        # Resources and prompts are optional server features. A server that
+        # advertises one but fails the list call should not sink the scan.
+        try:
+            return await coro
+        except Exception:  # noqa: BLE001
+            return None
+
     async def inner():
         async with open_transport(spec) as (read, write):
             async with ClientSession(read, write) as session:
-                await session.initialize()
-                return await session.list_tools()
+                init = await session.initialize()
+                caps = init.capabilities
+                tools = (await session.list_tools()).tools
+                resources, templates, prompts = [], [], []
+                if caps.resources:
+                    r = await optional(session.list_resources())
+                    resources = r.resources if r else []
+                    t = await optional(session.list_resource_templates())
+                    templates = (getattr(t, "resource_templates", None) or getattr(t, "resourceTemplates", [])) if t else []
+                if caps.prompts:
+                    p = await optional(session.list_prompts())
+                    prompts = p.prompts if p else []
+                return tools, resources, templates, prompts
 
-    result = await asyncio.wait_for(inner(), timeout=timeout)
+    tools, resources, templates, prompts = await asyncio.wait_for(inner(), timeout=timeout)
 
     report = []
-    for tool in result.tools:
-        risk, findings = assess_tool(tool.description, tool.input_schema)
+    for tool in tools:
+        risk, findings = assess_tool(tool.description, tool.input_schema, name=tool.name)
         report.append({
+            "kind": "tool",
             "name": tool.name,
             "risk": risk,
             "description": tool.description,
             "fingerprint": fingerprint(tool.description, tool.input_schema),
             "findings": findings,
             "inputs": list(tool.input_schema.get("properties", {}).keys()),
+        })
+    for kind, items in (("resource", resources), ("resource_template", templates)):
+        for res in items:
+            uri = str(getattr(res, "uri", None) or getattr(res, "uri_template", None) or getattr(res, "uriTemplate", ""))
+            mime = getattr(res, "mime_type", None) or getattr(res, "mimeType", None)
+            risk, findings = assess_resource(res.description, uri=uri, name=res.name)
+            report.append({
+                "kind": kind,
+                "name": res.name,
+                "risk": risk,
+                "description": res.description,
+                "uri": uri,
+                "fingerprint": fingerprint(res.description, {"uri": uri, "mime_type": mime}),
+                "findings": findings,
+                "inputs": [],
+            })
+    for prompt in prompts:
+        arguments = [
+            {"name": a.name, "description": a.description, "required": bool(a.required)}
+            for a in (prompt.arguments or [])
+        ]
+        risk, findings = assess_prompt(prompt.description, arguments, name=prompt.name)
+        report.append({
+            "kind": "prompt",
+            "name": prompt.name,
+            "risk": risk,
+            "description": prompt.description,
+            "fingerprint": fingerprint(prompt.description, arguments),
+            "findings": findings,
+            "inputs": [a["name"] for a in arguments],
         })
     return report
 
@@ -212,13 +262,34 @@ def diff_line(diff, snapshot_path):
     )
 
 
+KIND_LABEL = {"tool": "tool", "resource": "resource", "resource_template": "template", "prompt": "prompt"}
+
+
+def scan_title(report, prefix="MCP Scan"):
+    counts = {}
+    for entry in report:
+        counts[entry.get("kind", "tool")] = counts.get(entry.get("kind", "tool"), 0) + 1
+    parts = [f"{counts.get('tool', 0)} tools"]
+    if counts.get("resource") or counts.get("resource_template"):
+        parts.append(f"{counts.get('resource', 0) + counts.get('resource_template', 0)} resources")
+    if counts.get("prompt"):
+        parts.append(f"{counts['prompt']} prompts")
+    return f"{prefix} — {', '.join(parts)}"
+
+
 def print_table(report, diff=None, snapshot_path=None):
-    table = Table(title=f"MCP Scan — {len(report)} tools found")
-    table.add_column("Tool", style="cyan", no_wrap=True)
+    table = Table(title=scan_title(report))
+    table.add_column("Kind", style="dim", no_wrap=True)
+    table.add_column("Name", style="cyan", no_wrap=True)
     table.add_column("Risk")
     table.add_column("Why")
     for entry in report:
-        table.add_row(entry["name"], RISK_STYLE[entry["risk"]], format_findings(entry["findings"]))
+        table.add_row(
+            KIND_LABEL.get(entry.get("kind", "tool"), entry.get("kind")),
+            entry["name"],
+            RISK_STYLE[entry["risk"]],
+            format_findings(entry["findings"]),
+        )
 
     console = Console()
     console.print(table)
@@ -230,20 +301,22 @@ def print_table(report, diff=None, snapshot_path=None):
 def print_audit_table(results):
     table = Table(title=f"MCP Audit — {len(results)} servers")
     table.add_column("Server", style="magenta", no_wrap=True)
-    table.add_column("Tool", style="cyan", no_wrap=True)
+    table.add_column("Kind", style="dim", no_wrap=True)
+    table.add_column("Name", style="cyan", no_wrap=True)
     table.add_column("Risk")
     table.add_column("Why")
     for server in results:
         if server["status"] == "error":
-            table.add_row(server["server"], "—", "[bold red]ERROR[/bold red]", server["error"])
+            table.add_row(server["server"], "", "—", "[bold red]ERROR[/bold red]", server["error"])
         elif server["status"] == "skipped":
-            table.add_row(server["server"], "—", "[dim]SKIPPED[/dim]", server["error"])
+            table.add_row(server["server"], "", "—", "[dim]SKIPPED[/dim]", server["error"])
         elif not server["tools"]:
-            table.add_row(server["server"], "—", "[dim]EMPTY[/dim]", "server exposes no tools")
+            table.add_row(server["server"], "", "—", "[dim]EMPTY[/dim]", "server exposes no tools, resources or prompts")
         else:
             for i, entry in enumerate(server["tools"]):
                 table.add_row(
                     server["server"] if i == 0 else "",
+                    KIND_LABEL.get(entry.get("kind", "tool"), entry.get("kind")),
                     entry["name"],
                     RISK_STYLE[entry["risk"]],
                     format_findings(entry["findings"]),

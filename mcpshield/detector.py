@@ -232,15 +232,49 @@ def assess_description(text):
     return risk_from_findings(findings), findings
 
 
-def assess_tool(description, input_schema=None):
+def check_name(name):
+    """Names are short identifiers; the only poisoning that fits is hidden characters."""
+    return check_hidden_characters(name, location="name")
+
+
+def assess_tool(description, input_schema=None, name=None):
     """Assess a tool's description and every parameter description.
 
     Parameter descriptions are shown to the model exactly like the tool
     description, so they are an equally good place to hide instructions.
     """
     _, findings = assess_description(description)
+    findings += check_name(name)
     properties = (input_schema or {}).get("properties", {}) or {}
-    for name, spec in properties.items():
+    for param, spec in properties.items():
         if isinstance(spec, dict):
-            findings += check_text(spec.get("description"), location=f"input.{name}")
+            findings += check_text(spec.get("description"), location=f"input.{param}")
+    return risk_from_findings(findings), findings
+
+
+def assess_prompt(description, arguments=None, name=None):
+    """Assess a prompt's description and each argument description.
+
+    `arguments` is a list of dicts with at least "name" and "description".
+    """
+    _, findings = assess_description(description)
+    findings += check_name(name)
+    for arg in arguments or []:
+        if isinstance(arg, dict):
+            findings += check_text(arg.get("description"), location=f"argument.{arg.get('name', '?')}")
+    return risk_from_findings(findings), findings
+
+
+def assess_resource(description, uri=None, name=None):
+    """Assess a resource or resource template.
+
+    Resources often have no description, and that is normal, so a missing
+    one is not a finding here. The URI is checked for hidden characters and
+    for embedded instructions, since it is shown to the model verbatim.
+    """
+    findings = check_text(description) if description else []
+    findings += check_name(name)
+    if uri:
+        findings += check_hidden_characters(uri, location="uri")
+        findings += check_phrases(uri, location="uri")
     return risk_from_findings(findings), findings

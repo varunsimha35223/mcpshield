@@ -64,8 +64,9 @@ def scan_args(remote):
 def test_scan_url(remote):
     result = runner.invoke(app, ["scan", *scan_args(remote), "--json"])
     assert result.exit_code == 1, result.output
-    data = {t["name"]: t for t in json.loads(result.stdout)}
+    data = {t["name"]: t for t in json.loads(result.stdout) if t["kind"] == "tool"}
     assert set(data) == {"add_numbers", "get_weather", "read_notes", "format_text", "lookup_zip"}
+    assert sum(t["kind"] == "prompt" for t in json.loads(result.stdout)) == 3
     assert data["get_weather"]["risk"] == "DANGEROUS"
     assert data["add_numbers"]["risk"] == "SAFE"
 
@@ -74,7 +75,7 @@ def test_scan_url_table_and_snapshot(remote, tmp_path):
     snap = tmp_path / "snap.json"
     result = runner.invoke(app, ["scan", *scan_args(remote), "--snapshot", str(snap)])
     assert result.exit_code == 1
-    assert "DANGEROUS 4" in result.stdout
+    assert "DANGEROUS 8" in result.stdout
     saved = json.loads(snap.read_text())
     assert saved["server"].startswith(remote[0] + " http://")
 
@@ -88,7 +89,7 @@ def test_audit_remote_entry(remote, tmp_path):
     (server,) = json.loads(result.stdout)
     assert server["status"] == "ok"
     assert server["transport"] == transport
-    assert len(server["tools"]) == 5
+    assert len(server["tools"]) == 11
 
 
 def test_audit_streamable_http_alias(remote, tmp_path):

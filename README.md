@@ -1,8 +1,9 @@
 # MCPShield
 
 Static scanner for [Model Context Protocol](https://modelcontextprotocol.io) servers.
-It connects to a server over stdio, streamable HTTP, or SSE, lists its tools, and checks every tool and
-parameter description for signs of **tool poisoning**: hidden instructions,
+It connects to a server over stdio, streamable HTTP, or SSE, lists its tools,
+resources, and prompts, and checks every description (tool, parameter, resource,
+resource URI, prompt, prompt argument) for signs of **tool poisoning**: hidden instructions,
 exfiltration prompts, cross-tool hijacking, credential references, and invisible
 Unicode. A baseline snapshot catches **rug pulls**, where descriptions change
 after install.
@@ -56,10 +57,12 @@ mcpshield scan "..." --snapshot baseline.json                     # later runs d
 mcpshield scan "..." --snapshot baseline.json --update-snapshot   # accept changes
 ```
 
-A changed description or input schema is a `DANGEROUS` `rug_pull` finding.
-Tools added since the baseline are `WARNING` `new_tool`; tools that vanished
-appear as `WARNING` `removed_tool` rows. Commit the baseline next to your MCP
-config so CI catches a swap.
+A changed description or definition is a `DANGEROUS` `rug_pull` finding.
+Items added since the baseline are `WARNING` `new_item`; items that vanished
+appear as `WARNING` `removed_item` rows. Tools, resources, and prompts are
+tracked separately, so a prompt and a tool with the same name never collide.
+Commit the baseline next to your MCP config so CI catches a swap. Baselines
+written by older versions (tools only) are read and upgraded automatically.
 
 ## Risk levels
 
@@ -68,6 +71,10 @@ config so CI catches a swap.
 | `DANGEROUS` | Hidden instructions, exfiltration, tool shadowing, invisible Unicode, or a description that changed since the baseline. Do not install. |
 | `WARNING` | Credential references, URLs, base64-like blobs, dotfile paths, a missing description, or a tool added/removed since the baseline. Review by hand. |
 | `SAFE` | No rule fired. Static checks only; this is not proof of safety. |
+
+Resource *contents* are not fetched. The scanner looks at what a client shows
+the model before anything is called: names, descriptions, URIs, and argument
+descriptions. A resource that serves poisoned text when read is out of scope.
 
 ## Development
 
