@@ -102,9 +102,14 @@ code.
 | `WARNING` | Credential references, URLs, base64-like blobs, dotfile paths, a missing description, or a tool added/removed since the baseline. Review by hand. |
 | `SAFE` | No rule fired. Static checks only; this is not proof of safety. |
 
-Resource *contents* are not fetched. The scanner looks at what a client shows
-the model before anything is called: names, descriptions, URIs, and argument
-descriptions. A resource that serves poisoned text when read is out of scope.
+By default the scanner looks only at what a client shows the model before
+anything is called: names, descriptions, URIs, and argument descriptions.
+Add `--read-resources` to also fetch every concrete resource and run the same
+checks on its text (the first 64 KB; binary parts are skipped, and a resource
+that fails to read is noted, not flagged). It is off by default because
+reading a resource can have side effects or cost. Resource templates are never
+read, since they need parameters. Content is not part of the rug-pull
+fingerprint, because it is expected to change.
 
 ## Use in CI
 

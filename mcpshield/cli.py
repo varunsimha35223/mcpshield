@@ -17,7 +17,7 @@ from rich.table import Table
 
 from mcpshield import __version__
 from mcpshield.config import REMOTE_TRANSPORTS, ServerSpec, discover_configs, load_servers
-from mcpshield.detector import assess_prompt, assess_resource, assess_tool, risk_from_findings
+from mcpshield.detector import assess_prompt, assess_resource, assess_tool, check_text, risk_from_findings
 from mcpshield.policy import DEFAULT_FILENAME, TEMPLATE, PolicyError, discover_policy, load_policy
 from mcpshield.sarif import to_sarif
 from mcpshield.snapshot import apply_diff, build_snapshot, diff_snapshot, fingerprint, load_snapshot, save_snapshot
@@ -40,6 +40,9 @@ RISK_STYLE = {
 RISK_ORDER = {"SAFE": 0, "WARNING": 1, "DANGEROUS": 2}
 
 DEFAULT_TIMEOUT = 30.0
+
+# Only this much of a resource's text is scanned with --read-resources.
+CONTENT_LIMIT = 64 * 1024
 
 # Status messages go to stderr so --json output on stdout stays parseable.
 err = Console(stderr=True)
@@ -110,12 +113,34 @@ async def open_transport(spec):
         raise ValueError(f"unsupported transport {spec.transport!r}")
 
 
-async def collect_tools(spec, timeout=DEFAULT_TIMEOUT, policy=None):
+async def read_resource_text(session, uri):
+    """Fetch one resource. Returns {"text", "truncated", "blobs", "error"}.
+
+    Binary parts are counted, not scanned. A failed read is recorded, not
+    raised: an unreadable resource is not evidence of poisoning.
+    """
+    try:
+        result = await session.read_resource(uri)
+    except Exception as exc:  # noqa: BLE001
+        return {"text": "", "truncated": False, "blobs": 0, "error": describe_error(exc)}
+    texts, blobs = [], 0
+    for part in getattr(result, "contents", None) or []:
+        text = getattr(part, "text", None)
+        if text is not None:
+            texts.append(text)
+        elif getattr(part, "blob", None) is not None:
+            blobs += 1
+    text = "\n".join(texts)
+    return {"text": text[:CONTENT_LIMIT], "truncated": len(text) > CONTENT_LIMIT, "blobs": blobs, "error": None}
+
+
+async def collect_tools(spec, timeout=DEFAULT_TIMEOUT, policy=None, read_resources=False):
     """Connect to a server, list its tools, and assess each one.
 
     `policy` supplies extra rules at assessment time. Severity overrides and
     allow-lists are applied afterwards by finalize_report(), so that snapshot
-    findings are covered too.
+    findings are covered too. With `read_resources`, every concrete resource
+    is fetched and its text scanned as location "content".
     """
     if spec.transport not in SUPPORTED_TRANSPORTS:
         raise ValueError(f"unsupported transport {spec.transport!r}")
@@ -147,9 +172,13 @@ async def collect_tools(spec, timeout=DEFAULT_TIMEOUT, policy=None):
                 if caps.prompts:
                     p = await optional(session.list_prompts())
                     prompts = p.prompts if p else []
-                return tools, resources, templates, prompts
+                contents = {}
+                if read_resources:
+                    for res in resources:
+                        contents[str(res.uri)] = await read_resource_text(session, str(res.uri))
+                return tools, resources, templates, prompts, contents
 
-    tools, resources, templates, prompts = await asyncio.wait_for(inner(), timeout=timeout)
+    tools, resources, templates, prompts, contents = await asyncio.wait_for(inner(), timeout=timeout)
 
     report = []
     for tool in tools:
@@ -168,7 +197,7 @@ async def collect_tools(spec, timeout=DEFAULT_TIMEOUT, policy=None):
             uri = str(getattr(res, "uri", None) or getattr(res, "uri_template", None) or getattr(res, "uriTemplate", ""))
             mime = getattr(res, "mime_type", None) or getattr(res, "mimeType", None)
             risk, findings = assess_resource(res.description, uri=uri, name=res.name, policy=policy)
-            report.append({
+            entry = {
                 "kind": kind,
                 "name": res.name,
                 "risk": risk,
@@ -177,7 +206,21 @@ async def collect_tools(spec, timeout=DEFAULT_TIMEOUT, policy=None):
                 "fingerprint": fingerprint(res.description, {"uri": uri, "mime_type": mime}),
                 "findings": findings,
                 "inputs": [],
-            })
+            }
+            content = contents.get(uri) if kind == "resource" else None
+            if content is not None:
+                if content["text"]:
+                    findings += check_text(content["text"], location="content", policy=policy)
+                    entry["risk"] = risk_from_findings(findings)
+                # Content is deliberately not part of the fingerprint: it is
+                # expected to change between runs.
+                entry["content"] = {
+                    "chars": len(content["text"]),
+                    "truncated": content["truncated"],
+                    "blobs": content["blobs"],
+                    "error": content["error"],
+                }
+            report.append(entry)
     for prompt in prompts:
         arguments = [
             {"name": a.name, "description": a.description, "required": bool(a.required)}
@@ -272,6 +315,22 @@ def format_findings(findings):
     return "\n".join(lines)
 
 
+def why_text(entry):
+    text = format_findings(entry["findings"])
+    content = entry.get("content")
+    if content:
+        if content["error"]:
+            text += f"\n[dim]content unreadable: {content['error']}[/dim]"
+        else:
+            note = f"content scanned: {content['chars']} chars"
+            if content["truncated"]:
+                note += f" (truncated to {CONTENT_LIMIT})"
+            if content["blobs"]:
+                note += f", {content['blobs']} binary part(s) skipped"
+            text += f"\n[dim]{note}[/dim]"
+    return text
+
+
 def summary_line(tools):
     counts = {level: sum(1 for t in tools if t["risk"] == level) for level in RISK_ORDER}
     return (
@@ -317,7 +376,7 @@ def print_table(report, diff=None, snapshot_path=None):
             KIND_LABEL.get(entry.get("kind", "tool"), entry.get("kind")),
             entry["name"],
             RISK_STYLE[entry["risk"]],
-            format_findings(entry["findings"]),
+            why_text(entry),
         )
 
     console = Console()
@@ -348,7 +407,7 @@ def print_audit_table(results):
                     KIND_LABEL.get(entry.get("kind", "tool"), entry.get("kind")),
                     entry["name"],
                     RISK_STYLE[entry["risk"]],
-                    format_findings(entry["findings"]),
+                    why_text(entry),
                 )
         table.add_section()
 
@@ -439,6 +498,11 @@ def scan(
     ),
     sarif_output: bool = typer.Option(False, "--sarif", help="Emit SARIF 2.1.0 instead of a table."),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Write --json or --sarif output to this file."),
+    read_resources: bool = typer.Option(
+        False,
+        "--read-resources",
+        help=f"Also fetch every resource and scan its text (first {CONTENT_LIMIT // 1024} KB). Off by default: reading can have side effects.",
+    ),
 ):
     """Connect to an MCP server and check every tool for poisoning.
 
@@ -454,7 +518,7 @@ def scan(
     policy = resolve_policy(policy_path)
     spec = spec_from_target(server, transport.lower() if transport else None, dict(parse_header(h) for h in header))
     try:
-        report = asyncio.run(collect_tools(spec, timeout=timeout, policy=policy))
+        report = asyncio.run(collect_tools(spec, timeout=timeout, policy=policy, read_resources=read_resources))
     except Exception as exc:  # noqa: BLE001 - any launch failure is reported the same way
         err.print(f"[bold red]Could not scan server:[/bold red] {describe_error(exc)}")
         raise typer.Exit(code=2)
@@ -500,6 +564,11 @@ def audit(
     ),
     sarif_output: bool = typer.Option(False, "--sarif", help="Emit SARIF 2.1.0 instead of a table."),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Write --json or --sarif output to this file."),
+    read_resources: bool = typer.Option(
+        False,
+        "--read-resources",
+        help=f"Also fetch every resource and scan its text (first {CONTENT_LIMIT // 1024} KB). Off by default: reading can have side effects.",
+    ),
 ):
     """Scan every server defined in one or more MCP client config files.
 
@@ -545,7 +614,7 @@ def audit(
                 continue
 
             try:
-                entry["tools"] = asyncio.run(collect_tools(spec, timeout=timeout, policy=policy))
+                entry["tools"] = asyncio.run(collect_tools(spec, timeout=timeout, policy=policy, read_resources=read_resources))
             except Exception as exc:  # noqa: BLE001 - keep auditing the other servers
                 entry["status"] = "error"
                 entry["error"] = describe_error(exc)

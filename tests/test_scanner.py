@@ -37,7 +37,7 @@ def test_fixture_exposes_all_tools(tools):
 
 
 def test_fixture_exposes_resources_and_prompts(full_report):
-    assert set(by_kind(full_report, "resource")) == {"readme", "secrets"}
+    assert set(by_kind(full_report, "resource")) == {"readme", "secrets", "injected", "logo", "broken"}
     assert set(by_kind(full_report, "resource_template")) == {"any_file"}
     assert set(by_kind(full_report, "prompt")) == {"summarize", "review", "translate"}
 
@@ -94,7 +94,7 @@ def test_cli_json_output_and_exit_code():
     result = runner.invoke(app, ["scan", EVIL, "--json"])
     assert result.exit_code == 1
     data = json.loads(result.stdout)
-    assert len(data) == 11
+    assert len(data) == 14
     assert {d["kind"] for d in data} == {"tool", "resource", "resource_template", "prompt"}
 
 
@@ -123,8 +123,8 @@ def test_cli_table_output_mentions_summary():
     assert result.exit_code == 1
     assert "Summary:" in result.stdout
     assert "DANGEROUS 8" in result.stdout
-    assert "SAFE 3" in result.stdout
-    assert "5 tools, 3 resources, 3 prompts" in result.stdout
+    assert "SAFE 6" in result.stdout
+    assert "5 tools, 6 resources, 3 prompts" in result.stdout
 
 
 # --- Snapshot / rug-pull end to end -----------------------------------------
@@ -348,3 +348,79 @@ def test_audit_config_with_no_servers(tmp_path):
     assert "MCP Audit" not in result.stdout
     result = runner.invoke(app, ["audit", str(cfg), "--json"])
     assert json.loads(result.stdout) == []
+
+
+# --- --read-resources -------------------------------------------------------
+
+
+def test_without_read_resources_content_is_not_fetched(full_report):
+    injected = by_kind(full_report, "resource")["injected"]
+    assert injected["risk"] == "SAFE"
+    assert "content" not in injected
+
+
+def test_read_resources_scans_content():
+    result = runner.invoke(app, ["scan", EVIL, "--json", "--read-resources"])
+    assert result.exit_code == 1
+    data = {(e["kind"], e["name"]): e for e in json.loads(result.stdout)}
+
+    injected = data[("resource", "injected")]
+    assert injected["risk"] == "DANGEROUS"
+    assert all(f["location"] == "content" for f in injected["findings"])
+    assert {"hidden_instruction", "exfiltration", "credential_reference"} <= {f["rule"] for f in injected["findings"]}
+    assert injected["content"]["chars"] > 0 and injected["content"]["error"] is None
+    assert injected["content"]["truncated"] is False
+
+    readme = data[("resource", "readme")]
+    assert readme["risk"] == "SAFE" and readme["content"]["chars"] == len("hello")
+
+    logo = data[("resource", "logo")]
+    assert logo["risk"] == "SAFE"
+    assert logo["content"]["blobs"] == 1 and logo["content"]["chars"] == 0
+
+    broken = data[("resource", "broken")]
+    assert broken["risk"] == "SAFE" and broken["findings"] == []
+    assert broken["content"]["error"]
+
+    # Templates cannot be read without parameters, so they carry no content.
+    assert "content" not in data[("resource_template", "any_file")]
+    # Poisoned description + clean body: description findings only, body noted.
+    secrets = data[("resource", "secrets")]
+    assert all(f["location"] != "content" for f in secrets["findings"])
+    assert secrets["content"]["chars"] > 0
+
+
+def test_read_resources_does_not_change_fingerprints():
+    plain = {(e["kind"], e["name"]): e["fingerprint"] for e in json.loads(runner.invoke(app, ["scan", EVIL, "--json"]).stdout)}
+    read = {(e["kind"], e["name"]): e["fingerprint"] for e in json.loads(runner.invoke(app, ["scan", EVIL, "--json", "--read-resources"]).stdout)}
+    assert plain == read
+
+
+def test_read_resources_table_notes():
+    result = runner.invoke(app, ["scan", EVIL, "--read-resources"])
+    assert result.exit_code == 1
+    # Rich wraps cells at the runner's 80-column width, so check fragments that
+    # survive a line break rather than whole phrases.
+    flat = " ".join(result.stdout.split())
+    assert "DANGEROUS 9" in flat
+    assert "(in content)" in flat
+    assert "content scanned:" in flat
+    assert "part(s) skipped" in flat
+    assert "content unreadable" in flat
+
+
+def test_read_resources_in_audit(tmp_path):
+    cfg = write_config(tmp_path / "c.json", {"evil": fixture_server("evil_server.py")})
+    result = runner.invoke(app, ["audit", str(cfg), "--json", "--read-resources"])
+    (server,) = json.loads(result.stdout)
+    injected = next(t for t in server["tools"] if t["name"] == "injected")
+    assert injected["risk"] == "DANGEROUS"
+
+
+def test_read_resources_respects_policy(tmp_path):
+    pol = tmp_path / "p.toml"
+    pol.write_text('[allow]\nitems = ["resource:injected"]\n')
+    result = runner.invoke(app, ["scan", EVIL, "--json", "--read-resources", "--policy", str(pol)])
+    data = {(e["kind"], e["name"]): e for e in json.loads(result.stdout)}
+    injected = data[("resource", "injected")]
+    assert injected["risk"] == "SAFE" and all(f["allowed"] for f in injected["findings"])

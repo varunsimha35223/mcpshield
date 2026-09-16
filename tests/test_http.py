@@ -89,7 +89,7 @@ def test_audit_remote_entry(remote, tmp_path):
     (server,) = json.loads(result.stdout)
     assert server["status"] == "ok"
     assert server["transport"] == transport
-    assert len(server["tools"]) == 11
+    assert len(server["tools"]) == 14
 
 
 def test_audit_streamable_http_alias(remote, tmp_path):
