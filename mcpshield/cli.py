@@ -19,6 +19,7 @@ from mcpshield import __version__
 from mcpshield.config import REMOTE_TRANSPORTS, ServerSpec, discover_configs, load_servers
 from mcpshield.detector import assess_prompt, assess_resource, assess_tool, risk_from_findings
 from mcpshield.policy import DEFAULT_FILENAME, TEMPLATE, PolicyError, discover_policy, load_policy
+from mcpshield.sarif import to_sarif
 from mcpshield.snapshot import apply_diff, build_snapshot, diff_snapshot, fingerprint, load_snapshot, save_snapshot
 
 app = typer.Typer(no_args_is_help=True)
@@ -374,6 +375,29 @@ def validate_fail_on(fail_on):
     return fail_on
 
 
+def emit(servers, json_output, sarif_output, output, render_table):
+    """Write the chosen format to stdout or to --output. `servers` is audit-style."""
+    if json_output and sarif_output:
+        raise typer.BadParameter("--json and --sarif are mutually exclusive")
+    if output is not None and not (json_output or sarif_output):
+        raise typer.BadParameter("--output needs --json or --sarif")
+
+    if sarif_output:
+        text = json.dumps(to_sarif(servers, command_line=" ".join(shlex.quote(a) for a in sys.argv)), indent=2)
+    elif json_output:
+        payload = servers[0]["tools"] if servers and servers[0].get("config") is None and len(servers) == 1 else servers
+        text = json.dumps(payload, indent=2)
+    else:
+        render_table()
+        return
+
+    if output is None:
+        print(text)
+    else:
+        Path(output).write_text(text + "\n", encoding="utf-8")
+        err.print(f"[cyan]Wrote[/cyan] {output}")
+
+
 # --- Commands ---------------------------------------------------------------
 
 
@@ -413,6 +437,8 @@ def scan(
         "--policy",
         help=f"Policy file. Default: {DEFAULT_FILENAME} in the working directory or home directory, if present.",
     ),
+    sarif_output: bool = typer.Option(False, "--sarif", help="Emit SARIF 2.1.0 instead of a table."),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Write --json or --sarif output to this file."),
 ):
     """Connect to an MCP server and check every tool for poisoning.
 
@@ -438,10 +464,8 @@ def scan(
         diff = apply_snapshot(report, launch_string(spec), snapshot, update_snapshot)
     finalize_report(report, policy, server=server)
 
-    if json_output:
-        print(json.dumps(report, indent=2))
-    else:
-        print_table(report, diff, snapshot)
+    servers = [{"server": server, "config": None, "transport": spec.transport, "status": "ok", "error": None, "tools": report}]
+    emit(servers, json_output, sarif_output, output, lambda: print_table(report, diff, snapshot))
 
     sys.exit(exit_code_for(report, fail_on))
 
@@ -474,6 +498,8 @@ def audit(
         "--policy",
         help=f"Policy file. Default: {DEFAULT_FILENAME} in the working directory or home directory, if present.",
     ),
+    sarif_output: bool = typer.Option(False, "--sarif", help="Emit SARIF 2.1.0 instead of a table."),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Write --json or --sarif output to this file."),
 ):
     """Scan every server defined in one or more MCP client config files.
 
@@ -534,10 +560,7 @@ def audit(
     if not results:
         err.print(f"[yellow]No MCP servers defined in {len(paths)} config file(s). Nothing to audit.[/yellow]")
 
-    if json_output:
-        print(json.dumps(results, indent=2))
-    elif results:
-        print_audit_table(results)
+    emit(results, json_output, sarif_output, output, lambda: print_audit_table(results) if results else None)
 
     all_tools = [t for s in results for t in s["tools"]]
     sys.exit(exit_code_for(all_tools, fail_on))

@@ -128,6 +128,24 @@ Exit code `1` means a finding crossed `--fail-on`; `2` means a config or
 policy file could not be read. Unreachable servers are reported but do not
 fail the job on their own.
 
+### SARIF for code scanning
+
+`--sarif` writes SARIF 2.1.0, which GitHub code scanning turns into inline
+annotations on the config file that defines each server:
+
+```yaml
+      - run: mcpshield audit .mcp.json --sarif --output mcpshield.sarif
+        continue-on-error: true
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: mcpshield.sarif
+```
+
+`DANGEROUS` maps to `error`, `WARNING` to `warning`, and policy-allowed
+findings to `note` with a suppression, so they show as dismissed rather than
+disappearing. Unreachable or skipped servers appear as tool notifications.
+`--output` also works with `--json`.
+
 ## Development
 
 ```bash
