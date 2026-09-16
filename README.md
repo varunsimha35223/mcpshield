@@ -25,7 +25,22 @@ mcpshield scan "..." --fail-on warning   # stricter CI gate
 ```
 
 The exit code is `1` when any tool reaches the `--fail-on` level
-(default `DANGEROUS`), so the scan can block a pipeline.
+(default `DANGEROUS`), so the scan can block a pipeline. Exit code `2` means
+the server could not be scanned at all (bad command, crash, or `--timeout`).
+
+### Audit every server you have configured
+
+```bash
+mcpshield audit                          # finds Claude Desktop, Claude Code, Cursor, VS Code configs
+mcpshield audit ~/.claude.json .mcp.json # or name the files
+mcpshield audit --json --snapshot-dir .mcpshield/   # per-server baselines for CI
+```
+
+`audit` reads `mcpServers` / `servers` blocks (and Claude Code's per-project
+servers), launches each stdio server with the `env` from the config, and
+prints one table for all of them. A server that fails to start or times out
+shows as `ERROR` and does not stop the audit or change the exit code. Remote
+`http` / `sse` servers show as `SKIPPED` until that transport is supported.
 
 ### Rug-pull detection
 
