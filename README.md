@@ -106,12 +106,38 @@ Resource *contents* are not fetched. The scanner looks at what a client shows
 the model before anything is called: names, descriptions, URIs, and argument
 descriptions. A resource that serves poisoned text when read is out of scope.
 
+## Use in CI
+
+Commit a baseline next to your MCP config and let the scan gate the pipeline:
+
+```yaml
+# .github/workflows/mcp-audit.yml
+name: MCP audit
+on: [push, pull_request]
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv tool install git+https://github.com/<you>/mcpshield
+      - run: mcpshield audit .mcp.json --snapshot-dir .mcpshield --fail-on warning
+```
+
+Exit code `1` means a finding crossed `--fail-on`; `2` means a config or
+policy file could not be read. Unreachable servers are reported but do not
+fail the job on their own.
+
 ## Development
 
 ```bash
 uv sync
 uv run pytest
 ```
+
+The repository's own workflow in `.github/workflows/ci.yml` runs the suite on
+Python 3.10 to 3.13, then audits a clean and a poisoned fixture config and
+checks the exit codes, and finally proves a policy can silence the poisoned one.
 
 Layout:
 

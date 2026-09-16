@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest (py${{ matrix.python }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+
+  dogfood:
+    name: audit fixtures
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: clean config passes
+        run: uv run mcpshield audit tests/fixtures/ci_clean.json --fail-on warning
+      - name: poisoned config fails
+        run: |
+          set +e
+          uv run mcpshield audit tests/fixtures/ci_poisoned.json --json > report.json
+          code=$?
+          set -e
+          echo "exit code: $code"
+          test "$code" -eq 1
+          python - <<'EOF'
+          import json
+          data = json.load(open("report.json"))
+          bad = [t["name"] for s in data for t in s["tools"] if t["risk"] == "DANGEROUS"]
+          print("dangerous items:", bad)
+          assert len(bad) == 8, bad
+          EOF
+      - name: policy silences the poisoned config
+        run: uv run mcpshield audit tests/fixtures/ci_poisoned.json --policy tests/fixtures/ci_allow_all.toml

@@ -1,0 +1,3 @@
+# Used by CI to prove a policy can silence a known server.
+[allow]
+servers = ["weather-helper"]
