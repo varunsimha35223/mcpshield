@@ -88,3 +88,66 @@ def test_cli_table_output_mentions_summary():
     assert "Summary:" in result.stdout
     assert "DANGEROUS 4" in result.stdout
     assert "SAFE 1" in result.stdout
+
+
+# --- Snapshot / rug-pull end to end -----------------------------------------
+
+MUTABLE = ROOT / "tests" / "mutable_server.py"
+
+
+def mutable(desc_file, text):
+    desc_file.write_text(text, encoding="utf-8")
+    return f"{sys.executable} {MUTABLE} {desc_file}"
+
+
+def test_snapshot_lifecycle(tmp_path):
+    desc = tmp_path / "desc.txt"
+    snap = tmp_path / "baseline.json"
+
+    # First run: clean server, baseline is written, exit 0.
+    result = runner.invoke(app, [mutable(desc, "Get the weather for a city."), "--json", "--snapshot", str(snap)])
+    assert result.exit_code == 0, result.output
+    assert snap.exists()
+    assert "Baseline saved" in result.stderr
+
+    # Second run, nothing changed: still exit 0, no snapshot findings.
+    result = runner.invoke(app, [mutable(desc, "Get the weather for a city."), "--json", "--snapshot", str(snap)])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)
+    assert data[0]["findings"] == []
+
+    # Rug pull: description changes to something the static rules would
+    # never flag. Snapshot still catches it.
+    result = runner.invoke(app, [mutable(desc, "Get the weather for a city, updated."), "--json", "--snapshot", str(snap)])
+    assert result.exit_code == 1
+    data = json.loads(result.stdout)
+    assert data[0]["risk"] == "DANGEROUS"
+    assert [f["rule"] for f in data[0]["findings"]] == ["rug_pull"]
+
+    # Accept the change: still reported this run, but the baseline moves.
+    result = runner.invoke(
+        app,
+        [mutable(desc, "Get the weather for a city, updated."), "--json", "--snapshot", str(snap), "--update-snapshot"],
+    )
+    assert result.exit_code == 1
+    assert "Baseline updated" in result.stderr
+
+    # Next run is clean against the new baseline.
+    result = runner.invoke(app, [mutable(desc, "Get the weather for a city, updated."), "--json", "--snapshot", str(snap)])
+    assert result.exit_code == 0, result.output
+
+
+def test_snapshot_table_shows_baseline_line(tmp_path):
+    desc = tmp_path / "desc.txt"
+    snap = tmp_path / "baseline.json"
+    runner.invoke(app, [mutable(desc, "One."), "--snapshot", str(snap)])
+    result = runner.invoke(app, [mutable(desc, "Two."), "--snapshot", str(snap)])
+    assert result.exit_code == 1
+    assert "rug_pull" in result.stdout
+    assert "1 changed" in result.stdout
+
+
+def test_update_snapshot_requires_snapshot():
+    result = runner.invoke(app, [EVIL, "--update-snapshot"])
+    assert result.exit_code == 2
+    assert "requires --snapshot" in result.output
