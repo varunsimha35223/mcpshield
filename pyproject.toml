@@ -5,6 +5,8 @@ description = "Static scanner that checks MCP servers for tool poisoning, hidden
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+authors = [{ name = "Varun Simha Reddy Thippireddy" }]
+keywords = ["mcp", "model-context-protocol", "security", "prompt-injection", "tool-poisoning"]
 dependencies = [
     "mcp>=2.0.0",
     "rich>=15.0.0",
