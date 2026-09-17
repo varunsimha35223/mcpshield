@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 from mcpshield.cli import app
 from mcpshield.detector import DANGEROUS, SAFE, WARNING, assess_description, assess_tool, risk_from_findings
 from mcpshield.policy import EMPTY, Policy, PolicyError, discover_policy, load_policy
+from conftest import plain
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 EVIL = f"{sys.executable} {FIXTURES / 'evil_server.py'}"
@@ -214,15 +215,15 @@ sensitive_path = "IGNORE"
     data = json.loads(result.stdout)
     assert {t["risk"] for t in data} == {"SAFE", "WARNING"}
     assert {f["rule"] for t in data for f in t["findings"]} == {"credential_reference"}
-    assert "Policy:" in result.stderr
+    assert "Policy:" in plain(result.stderr)
 
 
 def test_scan_with_allowed_items(tmp_path):
     p = policy('[allow]\nitems = ["tool:*", "resource:*", "resource_template:*", "prompt:*"]\n', tmp_path)
     result = runner.invoke(app, ["scan", EVIL, "--policy", str(p)])
     assert result.exit_code == 0, result.output
-    assert "DANGEROUS 0" in result.stdout
-    assert "allowed by policy" in result.stdout
+    assert "DANGEROUS 0" in plain(result.stdout)
+    assert "allowed by policy" in plain(result.stdout)
 
 
 def test_scan_with_allowed_target(tmp_path):
@@ -244,14 +245,14 @@ def test_scan_auto_discovers_policy_in_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["scan", EVIL, "--json"])
     assert result.exit_code == 0, result.output
-    assert "Policy:" in result.stderr
+    assert "Policy:" in plain(result.stderr)
 
 
 def test_scan_bad_policy_exits_2(tmp_path):
     p = policy("[severity]\nx = 'nope'", tmp_path)
     result = runner.invoke(app, ["scan", EVIL, "--policy", str(p)])
     assert result.exit_code == 2
-    assert "Could not load policy" in result.stderr
+    assert "Could not load policy" in plain(result.stderr)
 
 
 def test_scan_missing_policy_file_exits_2(tmp_path):
@@ -304,7 +305,7 @@ def test_policy_init_writes_loadable_template(tmp_path, monkeypatch):
     # Refuses to overwrite.
     result = runner.invoke(app, ["policy", "--init"])
     assert result.exit_code == 2
-    assert "already exists" in result.stderr
+    assert "already exists" in plain(result.stderr)
 
 
 def test_policy_init_custom_path(tmp_path):
@@ -317,18 +318,18 @@ def test_policy_show_none_found(monkeypatch):
     monkeypatch.setattr("mcpshield.cli.discover_policy", lambda: None)
     result = runner.invoke(app, ["policy"])
     assert result.exit_code == 0
-    assert "No policy file found" in result.stdout
+    assert "No policy file found" in plain(result.stdout)
 
 
 def test_policy_show_summary(tmp_path):
     p = policy('[severity]\nembedded_url = "IGNORE"\n[allow]\nservers = ["a-*"]\n', tmp_path)
     result = runner.invoke(app, ["policy", str(p)])
     assert result.exit_code == 0, result.output
-    assert "embedded_url = IGNORE" in result.stdout
-    assert "servers ['a-*']" in result.stdout
+    assert "embedded_url = IGNORE" in plain(result.stdout)
+    assert "servers ['a-*']" in plain(result.stdout)
 
 
 def test_policy_show_empty_file(tmp_path):
     p = policy("", tmp_path)
     result = runner.invoke(app, ["policy", str(p)])
-    assert "built-in rules only" in result.stdout
+    assert "built-in rules only" in plain(result.stdout)

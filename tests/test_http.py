@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 from mcpshield.cli import app, open_transport, parse_header, spec_from_target
 from mcpshield.config import ServerSpec
+from conftest import plain
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 runner = CliRunner()
@@ -75,7 +76,7 @@ def test_scan_url_table_and_snapshot(remote, tmp_path):
     snap = tmp_path / "snap.json"
     result = runner.invoke(app, ["scan", *scan_args(remote), "--snapshot", str(snap)])
     assert result.exit_code == 1
-    assert "DANGEROUS 8" in result.stdout
+    assert "DANGEROUS 8" in plain(result.stdout)
     saved = json.loads(snap.read_text())
     assert saved["server"].startswith(remote[0] + " http://")
 
@@ -108,7 +109,7 @@ def test_wrong_transport_for_endpoint_is_an_error_not_a_hang(remote):
     other = "sse" if transport == "http" else "http"
     result = runner.invoke(app, ["scan", url, "--transport", other, "--timeout", "10"])
     assert result.exit_code == 2
-    assert "Could not scan server" in result.stderr
+    assert "Could not scan server" in plain(result.stderr)
 
 
 # --- No server listening ----------------------------------------------------
@@ -118,7 +119,7 @@ def test_scan_connection_refused_exits_2():
     url = f"http://127.0.0.1:{free_port()}/mcp"
     result = runner.invoke(app, ["scan", url, "--timeout", "10"])
     assert result.exit_code == 2
-    assert "Could not scan server" in result.stderr
+    assert "Could not scan server" in plain(result.stderr)
 
 
 def test_audit_connection_refused_is_per_server_error(tmp_path):
@@ -170,7 +171,7 @@ def test_parse_header(text, expected):
 def test_parse_header_rejects_bad_input(text):
     result = runner.invoke(app, ["scan", "https://x.example", "-H", text])
     assert result.exit_code == 2
-    assert "Name: value" in result.output
+    assert "Name: value" in plain(result.output)
 
 
 def test_http_headers_reach_the_client(monkeypatch):

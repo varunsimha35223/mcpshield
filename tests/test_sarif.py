@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 from mcpshield import __version__
 from mcpshield.cli import app
 from mcpshield.sarif import SARIF_VERSION, to_sarif
+from conftest import plain
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 EVIL = f"{sys.executable} {FIXTURES / 'evil_server.py'}"
@@ -133,7 +134,7 @@ def test_audit_sarif_to_file(tmp_path):
     result = runner.invoke(app, ["audit", str(cfg), "--sarif", "--output", str(out)])
     assert result.exit_code == 1, result.output
     assert result.stdout == ""
-    assert "Wrote" in result.stderr
+    assert "Wrote" in plain(result.stderr)
     run = json.loads(out.read_text())["runs"][0]
     assert all(r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == str(cfg) for r in run["results"])
     assert run["invocations"][0]["toolExecutionNotifications"][0]["message"]["text"].startswith("server 'dead' error")
@@ -150,13 +151,13 @@ def test_json_to_file_keeps_scan_shape(tmp_path):
 def test_json_and_sarif_are_exclusive():
     result = runner.invoke(app, ["scan", EVIL, "--json", "--sarif"])
     assert result.exit_code == 2
-    assert "mutually exclusive" in result.output
+    assert "mutually exclusive" in plain(result.output)
 
 
 def test_output_requires_a_machine_format(tmp_path):
     result = runner.invoke(app, ["scan", EVIL, "--output", str(tmp_path / "x")])
     assert result.exit_code == 2
-    assert "needs --json or --sarif" in result.output
+    assert "needs --json or --sarif" in plain(result.output)
 
 
 def test_policy_allowed_show_as_notes_in_sarif(tmp_path):

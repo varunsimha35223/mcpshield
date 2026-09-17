@@ -22,6 +22,7 @@ from mcpshield.oauth import (
     list_stored,
     server_key,
 )
+from conftest import plain
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 runner = CliRunner()
@@ -199,8 +200,8 @@ def test_open_transport_passes_provider_for_http(monkeypatch):
         async with open_transport(spec) as streams:
             return streams
 
-    plain = ServerSpec(name="t", transport="http", url="https://x.example/mcp")
-    asyncio.run(go(plain))
+    no_oauth = ServerSpec(name="t", transport="http", url="https://x.example/mcp")
+    asyncio.run(go(no_oauth))
     assert seen["auth"] is None
 
     with_oauth = ServerSpec(name="t", transport="http", url="https://x.example/mcp", oauth=True, oauth_port=7002)
@@ -255,7 +256,7 @@ def test_config_oauth_flag(tmp_path):
 def test_scan_oauth_rejects_stdio_target():
     result = runner.invoke(app, ["scan", "python s.py", "--oauth"])
     assert result.exit_code == 2
-    assert "URL targets" in result.output
+    assert "URL targets" in plain(result.output)
 
 
 def test_scan_oauth_marks_spec_and_extends_timeout(monkeypatch):
@@ -297,20 +298,20 @@ def test_audit_oauth_applies_to_remote_only(monkeypatch, tmp_path):
 def test_tokens_command(tmp_path, monkeypatch):
     monkeypatch.setattr("mcpshield.oauth.DEFAULT_TOKEN_DIR", tmp_path)
     result = runner.invoke(app, ["tokens"])
-    assert result.exit_code == 0 and "No stored OAuth tokens" in result.stdout
+    assert result.exit_code == 0 and "No stored OAuth tokens" in plain(result.stdout)
 
     asyncio.run(FileTokenStorage("https://a.example/mcp").set_tokens(OAuthToken(access_token="x", token_type="Bearer")))
     asyncio.run(FileTokenStorage("https://b.example/mcp").set_client_info(
         OAuthClientInformationFull(client_id="c", redirect_uris=["http://127.0.0.1:1/callback"])))
     result = runner.invoke(app, ["tokens"])
-    assert "token " in result.stdout and "https://a.example/mcp" in result.stdout
-    assert "registration only" in result.stdout and "https://b.example/mcp" in result.stdout
+    assert "token " in plain(result.stdout) and "https://a.example/mcp" in plain(result.stdout)
+    assert "registration only" in plain(result.stdout) and "https://b.example/mcp" in plain(result.stdout)
 
     result = runner.invoke(app, ["tokens", "--clear", "https://a.example/mcp"])
-    assert result.exit_code == 0 and "Cleared tokens" in result.stderr
+    assert result.exit_code == 0 and "Cleared tokens" in plain(result.stderr)
     result = runner.invoke(app, ["tokens", "--clear", "https://a.example/mcp"])
-    assert result.exit_code == 1 and "No stored tokens" in result.stderr
+    assert result.exit_code == 1 and "No stored tokens" in plain(result.stderr)
 
     result = runner.invoke(app, ["tokens", "--clear-all"])
-    assert result.exit_code == 0 and "Cleared 1 server" in result.stderr
+    assert result.exit_code == 0 and "Cleared 1 server" in plain(result.stderr)
     assert list_stored(tmp_path) == []

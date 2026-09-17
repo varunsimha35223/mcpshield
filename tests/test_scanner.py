@@ -8,6 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mcpshield.cli import app, collect_tools, spec_from_target
+from conftest import plain
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 EVIL = f"{sys.executable} {FIXTURES / 'evil_server.py'}"
@@ -101,7 +102,7 @@ def test_cli_json_output_and_exit_code():
 def test_cli_rejects_invalid_fail_on():
     result = runner.invoke(app, ["scan", EVIL, "--fail-on", "bogus"])
     assert result.exit_code == 2
-    assert "must be one of" in result.output
+    assert "must be one of" in plain(result.output)
 
 
 def test_cli_clean_server_exits_zero():
@@ -121,10 +122,10 @@ def test_cli_fail_on_warning_is_stricter():
 def test_cli_table_output_mentions_summary():
     result = runner.invoke(app, ["scan", EVIL])
     assert result.exit_code == 1
-    assert "Summary:" in result.stdout
-    assert "DANGEROUS 8" in result.stdout
-    assert "SAFE 6" in result.stdout
-    assert "5 tools, 6 resources, 3 prompts" in result.stdout
+    assert "Summary:" in plain(result.stdout)
+    assert "DANGEROUS 8" in plain(result.stdout)
+    assert "SAFE 6" in plain(result.stdout)
+    assert "5 tools, 6 resources, 3 prompts" in plain(result.stdout)
 
 
 # --- Snapshot / rug-pull end to end -----------------------------------------
@@ -145,7 +146,7 @@ def test_snapshot_lifecycle(tmp_path):
     result = runner.invoke(app, ["scan", mutable(desc, "Get the weather for a city."), "--json", "--snapshot", str(snap)])
     assert result.exit_code == 0, result.output
     assert snap.exists()
-    assert "Baseline saved" in result.stderr
+    assert "Baseline saved" in plain(result.stderr)
 
     # Second run, nothing changed: still exit 0, no snapshot findings.
     result = runner.invoke(app, ["scan", mutable(desc, "Get the weather for a city."), "--json", "--snapshot", str(snap)])
@@ -165,7 +166,7 @@ def test_snapshot_lifecycle(tmp_path):
     result = runner.invoke(app, ["scan", mutable(desc, "Get the weather for a city, updated."), "--json", "--snapshot", str(snap), "--update-snapshot"],
     )
     assert result.exit_code == 1
-    assert "Baseline updated" in result.stderr
+    assert "Baseline updated" in plain(result.stderr)
 
     # Next run is clean against the new baseline.
     result = runner.invoke(app, ["scan", mutable(desc, "Get the weather for a city, updated."), "--json", "--snapshot", str(snap)])
@@ -178,14 +179,14 @@ def test_snapshot_table_shows_baseline_line(tmp_path):
     runner.invoke(app, ["scan", mutable(desc, "One."), "--snapshot", str(snap)])
     result = runner.invoke(app, ["scan", mutable(desc, "Two."), "--snapshot", str(snap)])
     assert result.exit_code == 1
-    assert "rug_pull" in result.stdout
-    assert "1 changed" in result.stdout
+    assert "rug_pull" in plain(result.stdout)
+    assert "1 changed" in plain(result.stdout)
 
 
 def test_update_snapshot_requires_snapshot():
     result = runner.invoke(app, ["scan", EVIL, "--update-snapshot"])
     assert result.exit_code == 2
-    assert "requires --snapshot" in result.output
+    assert "requires --snapshot" in plain(result.output)
 
 
 # --- scan error handling ----------------------------------------------------
@@ -194,13 +195,13 @@ def test_update_snapshot_requires_snapshot():
 def test_scan_unlaunchable_server_exits_2():
     result = runner.invoke(app, ["scan", "/definitely/not/a/real/binary --flag"])
     assert result.exit_code == 2
-    assert "Could not scan server" in result.stderr
+    assert "Could not scan server" in plain(result.stderr)
 
 
 def test_scan_timeout_exits_2():
     result = runner.invoke(app, ["scan", f"{sys.executable} {FIXTURES / 'hang_server.py'}", "--timeout", "1.5"])
     assert result.exit_code == 2
-    assert "timed out" in result.stderr
+    assert "timed out" in plain(result.stderr)
 
 
 # --- audit ------------------------------------------------------------------
@@ -249,15 +250,15 @@ def test_audit_clean_only_exits_zero(tmp_path):
     cfg = write_config(tmp_path / "mcp.json", {"clean": fixture_server("clean_server.py")}, key="servers")
     result = runner.invoke(app, ["audit", str(cfg)])
     assert result.exit_code == 0, result.output
-    assert "MCP Audit" in result.stdout
-    assert "servers: 1, errors: 0, skipped: 0" in result.stdout
+    assert "MCP Audit" in plain(result.stdout)
+    assert "servers: 1, errors: 0, skipped: 0" in plain(result.stdout)
 
 
 def test_audit_errors_do_not_change_exit_code(tmp_path):
     cfg = write_config(tmp_path / "c.json", {"broken": {"command": "/definitely/not/a/real/binary"}})
     result = runner.invoke(app, ["audit", str(cfg)])
     assert result.exit_code == 0, result.output
-    assert "ERROR" in result.stdout
+    assert "ERROR" in plain(result.stdout)
 
 
 def test_audit_passes_env_to_server(tmp_path):
@@ -323,29 +324,29 @@ def test_audit_unreadable_config_exits_2(tmp_path):
     bad.write_text("{nope")
     result = runner.invoke(app, ["audit", str(bad)])
     assert result.exit_code == 2
-    assert "Could not read" in result.stderr
+    assert "Could not read" in plain(result.stderr)
 
 
 def test_audit_no_configs_found_exits_2(tmp_path, monkeypatch):
     monkeypatch.setattr("mcpshield.cli.discover_configs", lambda: [])
     result = runner.invoke(app, ["audit"])
     assert result.exit_code == 2
-    assert "No MCP config files found" in result.stderr
+    assert "No MCP config files found" in plain(result.stderr)
 
 
 def test_audit_update_snapshot_requires_dir(tmp_path):
     cfg = write_config(tmp_path / "c.json", {})
     result = runner.invoke(app, ["audit", str(cfg), "--update-snapshot"])
     assert result.exit_code == 2
-    assert "requires --snapshot-dir" in result.output
+    assert "requires --snapshot-dir" in plain(result.output)
 
 
 def test_audit_config_with_no_servers(tmp_path):
     cfg = write_config(tmp_path / "c.json", {})
     result = runner.invoke(app, ["audit", str(cfg)])
     assert result.exit_code == 0
-    assert "No MCP servers defined" in result.stderr
-    assert "MCP Audit" not in result.stdout
+    assert "No MCP servers defined" in plain(result.stderr)
+    assert "MCP Audit" not in plain(result.stdout)
     result = runner.invoke(app, ["audit", str(cfg), "--json"])
     assert json.loads(result.stdout) == []
 
@@ -401,7 +402,7 @@ def test_read_resources_table_notes():
     assert result.exit_code == 1
     # Rich wraps cells at the runner's 80-column width, so check fragments that
     # survive a line break rather than whole phrases.
-    flat = " ".join(result.stdout.split())
+    flat = plain(result.stdout)
     assert "DANGEROUS 9" in flat
     assert "(in content)" in flat
     assert "content scanned:" in flat
