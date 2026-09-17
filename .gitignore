@@ -9,6 +9,8 @@ wheels/
 # Virtual environments
 .venv
 
-# Claude Code local settings and per-user baselines
-.claude/settings.local.json
+# Editor and assistant settings, local baselines
+.claude/
+.cursor/
+.vscode/
 .mcpshield/
