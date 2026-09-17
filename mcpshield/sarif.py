@@ -11,7 +11,7 @@ from mcpshield import __version__
 
 SARIF_VERSION = "2.1.0"
 SARIF_SCHEMA = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json"
-INFORMATION_URI = "https://github.com/varunreddy/mcpshield"
+INFORMATION_URI = "https://github.com/varunsimha35223/mcpshield"
 
 LEVELS = {"DANGEROUS": "error", "WARNING": "warning"}
 

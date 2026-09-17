@@ -11,7 +11,7 @@ after install.
 ## Install
 
 ```bash
-uv tool install git+https://github.com/<you>/mcpshield   # or: pipx install ...
+uv tool install git+https://github.com/varunsimha35223/mcpshield   # or: pipx install ...
 mcpshield --help
 ```
 
@@ -146,7 +146,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv tool install git+https://github.com/<you>/mcpshield
+      - run: uv tool install git+https://github.com/varunsimha35223/mcpshield
       - run: mcpshield audit .mcp.json --snapshot-dir .mcpshield --fail-on warning
 ```
 
